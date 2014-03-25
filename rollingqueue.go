@@ -39,6 +39,8 @@ type RollingQueue struct {
 	writer             *os.File //just handle
 	reader             *os.File //just handle
 	meta               *os.File
+	writer_notify      chan int
+	is_writer_notify   bool
 	reader_w, reader_r int
 	reader_buf         []byte
 	reader_err         error
@@ -153,7 +155,20 @@ func (q *RollingQueue) writeAll(items [][]byte) {
 		binary.Write(buf, binary.LittleEndian, l)
 		binary.Write(buf, binary.LittleEndian, item)
 	}
-	_, err = q.writer.Write(buf.Bytes())
+	remainWriteSpace := q.remainWriteSpace()
+	bs := buf.Bytes()
+	if remainWriteSpace < len(bs) {
+		for {
+			select {
+			case <-q.writer_notify:
+			}
+			if q.remainWriteSpace() > len(bs) {
+				break
+			}
+		}
+	}
+	n, err = q.writer.Write(buf.Bytes())
+
 	if err != nil {
 		panic(err)
 	}
@@ -217,14 +232,17 @@ func open(path string, flag int) (*os.File, error) {
 	return f, nil
 }
 
-func (q *RollingQueue) fill() {
+func (q *RollingQueue) remainBytes() int {
+	return 0
+}
+
+func (q *RollingQueue) fill(remainBytes int) {
 	// Slide existing data to beginning.
 	if q.reader_r > 0 {
 		copy(q.reader_buf, q.reader_buf[q.reader_r:q.reader_w])
 		q.reader_w -= q.reader_r
 		q.reader_r = 0
 	}
-	var remainBytes int = q.remainBytes()
 	var n int
 	var err error
 	if remainBytes < len(q.reader_buf)-q.reader_w {
@@ -251,13 +269,14 @@ func (q *RollingQueue) Read(p []byte) (n int, err error) {
 		if q.reader_err != nil {
 			return 0, q.readErr()
 		}
-		if len(p) >= len(q.reader_buf) {
+		remainBytes := q.remainBytes()
+		if len(p) >= len(q.reader_buf) && remainBytes >= len(p) {
 			// Large read, empty buffer.
 			// Read directly into p to avoid copy.
 			n, q.reader_err = q.reader.Read(p)
 			return n, q.readErr()
 		}
-		q.fill()
+		q.fill(remainBytes)
 		if q.reader_w == q.reader_r {
 			return 0, q.readErr()
 		}
