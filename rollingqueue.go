@@ -1,19 +1,21 @@
 package pmsg
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"errors"
-	"hash/crc32"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
 )
 
 const (
-	MaxMetaSize = 1024
+	MaxMetaSize = 65535
 	Magic       = "RQ"
-	MetaSize    = 30
+	MetaSize    = 65535
 )
 
 var (
@@ -23,27 +25,33 @@ var (
 )
 
 type queueMeta struct {
-	Magic     [2]byte
-	PathCrc   uint32
-	MaxSize   int64
-	WriterPtr int64
-	ReaderPtr int64
+	Magic                 [2]byte
+	Path                  string
+	MaxFileSize           int64
+	MaxFile               uint8
+	WriterFileIdx         uint8
+	ReaderFileIdx         uint8
+	CurrentFileWriteBytes int64
+	CurrentFileReadBytes  int64
+	WriteBytes            int64
+	LimitBytes            int64 //LimitBytes must be greater than MaxFileSize
+	ReadBytes             int64
 }
 
 type RollingQueue struct {
 	queueMeta
-	Path               string
-	writerChan         chan []byte
-	readerChan         chan []byte
-	running            bool
-	writer             *os.File //just handle
-	reader             *os.File //just handle
-	meta               *os.File
-	writer_notify      chan int
-	is_writer_notify   bool
-	reader_w, reader_r int
-	reader_buf         []byte
-	reader_err         error
+	writerChan       chan []byte
+	readerChan       chan []byte
+	running          bool
+	_writer_file     *os.File //just handle
+	_reader_file     *os.File //just handle
+	writer           *bufio.Writer
+	reader           *bufio.Reader
+	meta             *os.File
+	writer_notify    chan int
+	is_writer_notify bool
+	reader_notify    chan int
+	is_reader_notify bool
 }
 
 func (queue *RollingQueue) Push(b []byte) {
@@ -57,12 +65,15 @@ func (queue *RollingQueue) Pop() []byte {
 func (queue *RollingQueue) dumpMeta() error {
 	queue.meta.Seek(0, os.SEEK_SET)
 	buf := bytes.NewBuffer(nil)
+	var flen int32
+	flen = int32(len(queue.Path))
 	datas := []interface{}{
 		queue.Magic[:],
-		queue.PathCrc,
-		queue.MaxSize,
-		queue.WriterPtr,
-		queue.ReaderPtr,
+		flen,
+		[]byte(queue.Path),
+		queue.MaxFileSize,
+		queue.CurrentFileWriteBytes,
+		queue.CurrentFileReadBytes,
 	}
 	for _, data := range datas {
 		if err := binary.Write(buf, binary.LittleEndian, data); err != nil {
@@ -77,12 +88,6 @@ func (queue *RollingQueue) dumpMeta() error {
 	return nil
 }
 
-func (q *RollingQueue) readErr() error {
-	err := q.reader_err
-	q.reader_err = nil
-	return err
-}
-
 func (queue *RollingQueue) readMeta() error {
 	data := make([]byte, MetaSize, MaxMetaSize)
 	n, err := queue.meta.Read(data)
@@ -93,29 +98,37 @@ func (queue *RollingQueue) readMeta() error {
 	if n != MetaSize {
 		return UnknownMeta
 	}
-	hash := crc32.ChecksumIEEE([]byte(queue.Path))
 
 	buf := bytes.NewBuffer(data)
 	err = binary.Read(buf, binary.LittleEndian, queue.Magic[:])
 	if err != nil || string(queue.Magic[:]) != Magic {
 		return UnknownMeta
 	}
-	err = binary.Read(buf, binary.LittleEndian, &queue.PathCrc)
-	if err != nil || hash != queue.PathCrc {
+
+	var flen int32
+	err = binary.Read(buf, binary.LittleEndian, &flen)
+	if err != nil {
 		return UnknownMeta
 	}
+	path := make([]byte, flen)
 
-	err = binary.Read(buf, binary.LittleEndian, &queue.MaxSize)
+	err = binary.Read(buf, binary.LittleEndian, path)
+	queue.Path = string(path)
 	if err != nil {
 		return UnknownMeta
 	}
 
-	err = binary.Read(buf, binary.LittleEndian, &queue.WriterPtr)
+	err = binary.Read(buf, binary.LittleEndian, &queue.MaxFileSize)
 	if err != nil {
 		return UnknownMeta
 	}
 
-	err = binary.Read(buf, binary.LittleEndian, &queue.ReaderPtr)
+	err = binary.Read(buf, binary.LittleEndian, &queue.CurrentFileWriteBytes)
+	if err != nil {
+		return UnknownMeta
+	}
+
+	err = binary.Read(buf, binary.LittleEndian, &queue.CurrentFileReadBytes)
 	if err != nil {
 		return UnknownMeta
 	}
@@ -128,7 +141,6 @@ func (q *RollingQueue) initMeta(metaPath string) error {
 		return err
 	}
 	copy(q.Magic[:], []byte(Magic))
-	q.PathCrc = crc32.ChecksumIEEE([]byte(q.Path))
 	return nil
 }
 
@@ -155,23 +167,63 @@ func (q *RollingQueue) writeAll(items [][]byte) {
 		binary.Write(buf, binary.LittleEndian, l)
 		binary.Write(buf, binary.LittleEndian, item)
 	}
-	remainWriteSpace := q.remainWriteSpace()
 	bs := buf.Bytes()
-	if remainWriteSpace < len(bs) {
-		for {
+	if q.WriteBytes > 0 && q.WriteBytes-q.ReadBytes >= q.LimitBytes {
+		q.is_writer_notify = true
+		for q.WriteBytes > 0 && q.WriteBytes-q.ReadBytes >= q.LimitBytes {
 			select {
 			case <-q.writer_notify:
 			}
-			if q.remainWriteSpace() > len(bs) {
-				break
-			}
 		}
+		q.is_writer_notify = false
+	} else {
+		q.is_writer_notify = false
 	}
-	n, err = q.writer.Write(buf.Bytes())
-
+	if q.writer == nil {
+		q.openWriter()
+	}
+	var n int
+	n, err = q.writer.Write(bs)
 	if err != nil {
 		panic(err)
 	}
+	err = q.writer.Flush()
+	if err != nil {
+		panic(err)
+	}
+	q.CurrentFileWriteBytes += int64(n)
+	if q.CurrentFileWriteBytes > q.MaxFileSize {
+		q._writer_file.Close()
+		q.CurrentFileWriteBytes = 0
+		q.WriterFileIdx++
+		if q.WriterFileIdx > q.MaxFile {
+			q.WriterFileIdx = 0
+		}
+		q.openWriter()
+	}
+	q.WriteBytes += int64(n)
+	if q.is_reader_notify {
+
+		q.reader_notify <- 1
+	}
+}
+
+func (q *RollingQueue) openWriter() {
+	var err error
+	q._writer_file, err = open(fmt.Sprintf("%s.%d", q.Path, q.WriterFileIdx), os.O_WRONLY|os.O_CREATE)
+	if err != nil {
+		panic(err)
+	}
+	q.writer = bufio.NewWriter(q._writer_file)
+}
+
+func (q *RollingQueue) openReader() {
+	var err error
+	q._reader_file, err = open(fmt.Sprintf("%s.%d", q.Path, q.ReaderFileIdx), os.O_RDONLY)
+	if err != nil {
+		panic(err)
+	}
+	q.reader = bufio.NewReader(q._reader_file)
 }
 
 func (q *RollingQueue) pushin() {
@@ -183,11 +235,11 @@ func (q *RollingQueue) pushin() {
 			cache = append(cache, item)
 			if len(cache) == cap(cache) {
 				q.writeAll(cache)
-				cache = cache[:]
+				cache = make([][]byte, 0, 100)
 			}
 		case <-time.After(1 * time.Second):
 			q.writeAll(cache)
-			cache = cache[:]
+			cache = make([][]byte, 0, 100)
 		}
 	}
 }
@@ -197,12 +249,60 @@ func (q *RollingQueue) readItem() []byte {
 	var l int64
 	var err error
 	var bs []byte
+	if q.WriteBytes < 4 || q.WriteBytes-q.ReadBytes < 4 {
+		q.is_reader_notify = true
+		<-q.reader_notify
+		q.is_reader_notify = false
+	} else {
+		q.is_reader_notify = false
+	}
+	if q.reader == nil {
+		q.openReader()
+	}
 	err = binary.Read(q.reader, binary.LittleEndian, &l)
+	if err != nil {
+		var flen int64
+		if state, err := q._reader_file.Stat(); err != nil {
+			panic(err)
+		} else {
+			flen = state.Size()
+		}
+		if err == io.EOF && q.CurrentFileReadBytes == flen {
+			q.CurrentFileReadBytes = 0
+			q.ReaderFileIdx++
+			if q.ReaderFileIdx > q.MaxFile {
+				q.ReaderFileIdx = 0
+			}
+			var name = q._reader_file.Name()
+			q._reader_file.Close()
+			println(name)
+			os.Remove(name)
+			q.openReader()
+			return q.readItem()
+		}
+		panic(err)
+	}
+	if l > 10000 {
+		rp, _ := q._reader_file.Seek(0, os.SEEK_CUR)
+		wp, _ := q._writer_file.Seek(0, os.SEEK_CUR)
+		println(q.WriteBytes, q.ReadBytes, wp, rp, l)
+	}
+	bs = make([]byte, int(l))
+	var n int
+	n, err = q.reader.Read(bs)
 	if err != nil {
 		panic(err)
 	}
-	bs = make([]byte, int(l))
-	err = binary.Read(q.reader, binary.LittleEndian, &l)
+	q.ReadBytes += int64(n) + 8
+	q.CurrentFileReadBytes += int64(n) + 8
+	if q.ReadBytes == q.WriteBytes {
+		q.ReadBytes = 0
+		q.WriteBytes = 0
+	}
+	if q.is_writer_notify {
+		q.writer_notify <- 1
+	}
+	return bs
 }
 
 func (q *RollingQueue) popout() {
@@ -232,64 +332,6 @@ func open(path string, flag int) (*os.File, error) {
 	return f, nil
 }
 
-func (q *RollingQueue) remainBytes() int {
-	return 0
-}
-
-func (q *RollingQueue) fill(remainBytes int) {
-	// Slide existing data to beginning.
-	if q.reader_r > 0 {
-		copy(q.reader_buf, q.reader_buf[q.reader_r:q.reader_w])
-		q.reader_w -= q.reader_r
-		q.reader_r = 0
-	}
-	var n int
-	var err error
-	if remainBytes < len(q.reader_buf)-q.reader_w {
-		n, err = q.reader.Read(q.reader_buf[q.reader_w : q.reader_w+remainBytes])
-	} else {
-		// Read new data.
-		n, err = q.reader.Read(q.reader_buf[q.reader_w:])
-	}
-	if n < 0 {
-		panic(errNegativeRead)
-	}
-	q.reader_w += n
-	if err != nil {
-		q.reader_err = err
-	}
-}
-
-func (q *RollingQueue) Read(p []byte) (n int, err error) {
-	n = len(p)
-	if n == 0 {
-		return n, q.readErr()
-	}
-	if q.reader_w == q.reader_r {
-		if q.reader_err != nil {
-			return 0, q.readErr()
-		}
-		remainBytes := q.remainBytes()
-		if len(p) >= len(q.reader_buf) && remainBytes >= len(p) {
-			// Large read, empty buffer.
-			// Read directly into p to avoid copy.
-			n, q.reader_err = q.reader.Read(p)
-			return n, q.readErr()
-		}
-		q.fill(remainBytes)
-		if q.reader_w == q.reader_r {
-			return 0, q.readErr()
-		}
-	}
-
-	if n > q.reader_w-q.reader_r {
-		n = q.reader_w - q.reader_r
-	}
-	copy(p[0:n], q.reader_buf[q.reader_r:])
-	q.reader_r += n
-	return n, nil
-}
-
 func createRollingQueue(p string) (queue *RollingQueue, err error) {
 	q := &RollingQueue{}
 	var stat os.FileInfo
@@ -314,16 +356,21 @@ func createRollingQueue(p string) (queue *RollingQueue, err error) {
 			return
 		}
 	}
+	q.MaxFileSize = 1024 * 1024 * 5
+	if q.LimitBytes < q.MaxFileSize {
+		q.LimitBytes = q.MaxFileSize
+	}
+	if q.MaxFile <= 1 {
+		q.MaxFile = 3
+	}
 	q.dumpMeta()
 	q.running = true
-	if q.reader, err = open(q.Path, os.O_RDONLY); err != nil {
-		return
-	}
-	if q.writer, err = open(q.Path, os.O_WRONLY); err != nil {
-		return
-	}
 	q.readerChan = make(chan []byte, 1)
 	q.writerChan = make(chan []byte, 1)
+	q.reader_notify = make(chan int, 1)
+	q.writer_notify = make(chan int, 1)
+	q.is_reader_notify = false
+	q.is_writer_notify = false
 	go q.pushin()
 	go q.popout()
 	queue = q
