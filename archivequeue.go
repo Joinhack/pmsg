@@ -128,13 +128,17 @@ func createArchiveQueue(p string) (queue *ArchiveQueue, err error) {
 	var stat os.FileInfo
 	archDir := filepath.Join(q.Dir, "arch")
 	stat, err = os.Stat(archDir)
-	if err != nil && os.IsNotExist(err) {
-		err = os.Mkdir(archDir, 0755)
-		if err != nil {
+	if err != nil {
+		if os.IsNotExist(err) {
+			if e := os.Mkdir(archDir, 0755); e != nil {
+				err = e
+
+				return
+			}
+		} else {
 			return
 		}
-	}
-	if !stat.IsDir() {
+	} else if !stat.IsDir() {
 		err = MustbeDir
 		return
 	}
@@ -147,5 +151,6 @@ func createArchiveQueue(p string) (queue *ArchiveQueue, err error) {
 	q.running = true
 	go q.pushin()
 	queue = q
+	err = nil
 	return
 }
