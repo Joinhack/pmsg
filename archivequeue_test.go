@@ -7,7 +7,7 @@ import (
 
 func TestRollingQueueMetaWriteRead(t *testing.T) {
 	var err error
-	var q *RollingQueue
+	var q *ArchiveQueue
 	if q, err = createArchiveQueue("a.data"); err != nil {
 		panic(err)
 	}
