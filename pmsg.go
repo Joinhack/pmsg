@@ -3,7 +3,7 @@ package pmsg
 import (
 	"encoding/binary"
 	"errors"
-	//"fmt"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -27,6 +27,8 @@ var (
 
 	UnknownFramedMsg = errors.New("unknow framed msg")
 
+	UnknownMsg = errors.New("unknow msg")
+
 	TRACE *log.Logger = log.New(os.Stdout, "TRACE ", log.Ldate|log.Ltime|log.Lshortfile)
 	WARN  *log.Logger = log.New(os.Stdout, "WARN ", log.Ldate|log.Ltime|log.Lshortfile)
 	INFO  *log.Logger = log.New(os.Stdout, "INFO ", log.Ldate|log.Ltime|log.Lshortfile)
@@ -35,18 +37,37 @@ var (
 
 type Msg interface {
 	Bytes() []byte
+	Body() []byte
 }
 
-type RouteMsg interface {
+type RouteMsg struct {
 	Msg
-	Destination() uint64
+	To    uint64
+	Carry []byte
+}
+
+func (msg *RouteMsg) Destination() uint64 {
+	return msg.To
+}
+
+func (msg *RouteMsg) Body() []byte {
+	return msg.Carry
+}
+
+func (msg *RouteMsg) Bytes() []byte {
+	bs := make([]byte, 13+len(msg.Carry))
+	copy(bs[13:], msg.Carry)
+	bs[0] = RouteMsgType
+	binary.LittleEndian.PutUint64(bs[1:], msg.Destination())
+	binary.LittleEndian.PutUint32(bs[9:], uint32(len(msg.Carry)))
+	return bs
 }
 
 type Conn struct {
 	net.Conn
 	address string
 	wchan   chan Msg
-	id      int
+	id      uint64
 }
 
 type routerOper struct {
@@ -71,6 +92,7 @@ type MsgHub struct {
 	servAddr       string
 	outgoing       [RouterMaskBits]*Conn
 	incoming       [RouterMaskBits]*Conn
+	clients        map[string]*Conn
 	routerOperChan chan *routerOper
 }
 
@@ -101,6 +123,43 @@ func (hub *MsgHub) processRouterOper() {
 			}
 		}
 	}
+}
+
+func (conn *Conn) sendMsgLoop(cb func()) {
+	defer func() {
+		if err := recover(); err != nil {
+			ERROR.Println(err)
+		}
+		cb()
+		conn.Close()
+	}()
+	var msg Msg
+	for {
+		select {
+		case msg = <-conn.wchan:
+		}
+		conn.Write(msg.Body())
+	}
+}
+
+func (hub *MsgHub) AddClient(id uint64, typ byte, c net.Conn) {
+	conn := &Conn{id: id, Conn: c, wchan: make(chan Msg, 1)}
+	key := fmt.Sprintf("%d.%d")
+	hub.clients[key] = conn
+	hub.AddRoute(id, typ, hub.id)
+	var routeMsg RouteControlMsg
+	routeMsg.ControlType = AddRouteControlType
+	routeMsg.Type = typ
+	routeMsg.Id = id
+	hub.BordcastMsg(&routeMsg)
+	go conn.sendMsgLoop(func() {
+		delete(hub.clients, key)
+		var msg RouteControlMsg
+		msg.ControlType = AddRouteControlType
+		msg.Type = typ
+		msg.Id = id
+		hub.BordcastMsg(&msg)
+	})
 }
 
 func (hub *MsgHub) AddRoute(d uint64, typ byte, id int) error {
@@ -140,8 +199,8 @@ type WhoamIMsg struct {
 
 type RouteControlMsg struct {
 	ControlType int
-	Type        uint8 //0x1 0x2
-	Destination uint64
+	Type        uint8  //0x1 0x2
+	Id          uint64 //client Id
 }
 
 func (msg *RouteControlMsg) Unmarshal(bs []byte) error {
@@ -150,7 +209,7 @@ func (msg *RouteControlMsg) Unmarshal(bs []byte) error {
 	}
 	msg.ControlType = int(bs[1])
 	msg.Type = bs[2]
-	msg.Destination = binary.LittleEndian.Uint64(bs[3:])
+	msg.Id = binary.LittleEndian.Uint64(bs[3:])
 	return nil
 }
 
@@ -168,8 +227,12 @@ func (msg *RouteControlMsg) Bytes() []byte {
 	bs[0] = ControlMsgType
 	bs[1] = byte(msg.ControlType)
 	bs[2] = msg.Type & RouterTypeMask
-	binary.LittleEndian.PutUint64(bs[3:], msg.Destination)
+	binary.LittleEndian.PutUint64(bs[3:], msg.Id)
 	return bs
+}
+
+func (msg *RouteControlMsg) Body() []byte {
+	return msg.Bytes()
 }
 
 func (msg *WhoamIMsg) Len() int {
@@ -209,6 +272,10 @@ func NewStringMsg(content string) *StringMsg {
 
 func (c *StringMsg) Bytes() []byte {
 	return c.bytes
+}
+
+func (c *StringMsg) Body() []byte {
+	return c.Bytes()
 }
 
 var Ping = NewStringMsg("PING")
@@ -256,11 +323,28 @@ func (hub *MsgHub) outgoingLoop(conn *Conn) {
 	}
 }
 
-func (hub *MsgHub) LocalDispatch(msg RouteMsg) {
+func (hub *MsgHub) BordcastMsg(msg Msg) {
+	for _, conn := range hub.outgoing {
+		if conn != nil {
+			conn.wchan <- msg
+		}
+	}
+}
+
+//we only have 2 bits for mask type.
+func (hub *MsgHub) LocalDispatch(msg *RouteMsg) {
+
+	if conn, ok := hub.clients[fmt.Sprintln("%d.1")]; ok {
+		conn.wchan <- msg
+	}
+
+	if conn, ok := hub.clients[fmt.Sprintln("%d.2")]; ok {
+		conn.wchan <- msg
+	}
 
 }
 
-func (hub *MsgHub) RemoteDispatch(msg RouteMsg) {
+func (hub *MsgHub) RemoteDispatch(msg *RouteMsg) {
 	outgoing := hub.outgoing[msg.Destination()]
 	defer func() {
 		if err := recover(); err != nil {
@@ -276,9 +360,9 @@ func (hub *MsgHub) RemoteDispatch(msg RouteMsg) {
 	}
 }
 
-func (hub *MsgHub) Dispatch(msg RouteMsg) {
+func (hub *MsgHub) Dispatch(msg *RouteMsg) {
 	dest := msg.Destination()
-	id := int(hub.router[dest] & RouteMsg)
+	id := int(hub.router[dest] & RouterMask)
 	if hub.id == id {
 		hub.LocalDispatch(msg)
 	} else {
@@ -297,7 +381,7 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 		ERROR.Println(UnknownFramedMsg)
 		return
 	}
-	conn := &Conn{id: whoami.Who, Conn: c}
+	conn := &Conn{id: uint64(whoami.Who), Conn: c}
 	if hub.incoming[conn.id] != nil {
 		hub.incoming[conn.id].Close()
 	}
@@ -324,15 +408,40 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 					return
 				}
 				if msg.ControlType == AddRouteControlType {
-					err = hub.AddRoute(msg.Destination, msg.Type, conn.id)
+					err = hub.AddRoute(msg.Id, msg.Type, int(conn.id))
 				} else {
-					err = hub.RemoveRoute(msg.Destination, msg.Type)
+					err = hub.RemoveRoute(msg.Id, msg.Type)
 				}
 				if err != nil {
 					ERROR.Println(err)
 					return
 				}
+
 			}
+		case RouteMsgType:
+			var msg RouteMsg
+			if n < 13 {
+				ERROR.Println(UnknownMsg)
+				return
+			}
+			msg.To = binary.LittleEndian.Uint64(buf[1:])
+			l := binary.LittleEndian.Uint32(buf[9:])
+			body := make([]byte, l)
+			copy(body, buf[13:n])
+			var rn uint32 = uint32(n - 13)
+
+			for {
+				n, err = conn.Read(body[rn:])
+				if err != nil {
+					ERROR.Println(err)
+					return
+				}
+				if rn == l {
+					break
+				}
+			}
+			msg.Carry = body
+			hub.LocalDispatch(&msg)
 		}
 	}
 
@@ -359,7 +468,7 @@ func (hub *MsgHub) AddOutgoing(id int, addr string) (conn *Conn, err error) {
 		err = OutofServerRange
 		return
 	}
-	conn = &Conn{id: id, address: addr, wchan: make(chan Msg, 1)}
+	conn = &Conn{id: uint64(id), address: addr, wchan: make(chan Msg, 1)}
 	hub.outgoing[id] = conn
 	go hub.outgoingLoop(conn)
 	return
