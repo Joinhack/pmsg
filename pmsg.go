@@ -86,7 +86,6 @@ type ClientConn struct {
 	Type  byte
 	wchan chan Msg
 	Id    uint64
-	hub   *MsgHub
 }
 
 func (conn *ClientConn) toKey() string {
@@ -183,7 +182,6 @@ func (hub *MsgHub) AddClient(client *ClientConn) error {
 	client.wchan = make(chan Msg, 1)
 	hub.clients[key] = client
 	hub.AddRoute(client.Id, client.Type, hub.id)
-	client.hub = hub
 	routeMsg.ControlType = AddRouteControlType
 	routeMsg.Type = client.Type
 	routeMsg.Id = client.Id
