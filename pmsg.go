@@ -27,7 +27,11 @@ var (
 
 	UnknownFramedMsg = errors.New("unknow framed msg")
 
+	NoSuchType = errors.New("No such type")
+
 	UnknownMsg = errors.New("unknow msg")
+
+	OutOfHubIdRange = errors.New("Out of hub id range")
 
 	TRACE *log.Logger = log.New(os.Stdout, "TRACE ", log.Ldate|log.Ltime|log.Lshortfile)
 	WARN  *log.Logger = log.New(os.Stdout, "WARN ", log.Ldate|log.Ltime|log.Lshortfile)
@@ -40,21 +44,26 @@ type Msg interface {
 	Body() []byte
 }
 
-type RouteMsg struct {
+type RouteMsg interface {
 	Msg
+	Destination() uint64
+}
+
+type DeliverMsg struct {
+	RouteMsg
 	To    uint64
 	Carry []byte
 }
 
-func (msg *RouteMsg) Destination() uint64 {
+func (msg *DeliverMsg) Destination() uint64 {
 	return msg.To
 }
 
-func (msg *RouteMsg) Body() []byte {
+func (msg *DeliverMsg) Body() []byte {
 	return msg.Carry
 }
 
-func (msg *RouteMsg) Bytes() []byte {
+func (msg *DeliverMsg) Bytes() []byte {
 	bs := make([]byte, 13+len(msg.Carry))
 	copy(bs[13:], msg.Carry)
 	bs[0] = RouteMsgType
@@ -70,10 +79,22 @@ type Conn struct {
 	id      uint64
 }
 
+type ClientConn struct {
+	net.Conn
+	Type  byte
+	wchan chan Msg
+	Id    uint64
+	hub   *MsgHub
+}
+
+func (conn *ClientConn) toKey() string {
+	return fmt.Sprintf("%d.%d", conn.Id, conn.Type)
+}
+
 type routerOper struct {
 	destination uint64
 	typ         byte
-	serverid    int
+	hubId       int
 	oper        int
 }
 
@@ -92,14 +113,19 @@ type MsgHub struct {
 	servAddr       string
 	outgoing       [RouterMaskBits]*Conn
 	incoming       [RouterMaskBits]*Conn
-	clients        map[string]*Conn
+	clients        map[string]*ClientConn
 	routerOperChan chan *routerOper
+	listener       net.Listener
 }
 
 func (hub *MsgHub) processRouterOper() {
 	for {
 		select {
-		case oper := <-hub.routerOperChan:
+		case oper, ok := <-hub.routerOperChan:
+			if !ok {
+				//channel closed
+				return
+			}
 			if oper.destination > hub.maxDest {
 				ERROR.Println("invalidate operation")
 				continue
@@ -107,7 +133,7 @@ func (hub *MsgHub) processRouterOper() {
 			switch oper.oper {
 			case oper_add:
 
-				v := (oper.typ << 6) | (RouterMask & byte(oper.serverid))
+				v := (oper.typ << 6) | (RouterMask & byte(oper.hubId))
 				hub.router[oper.destination] = v
 			case oper_remove:
 				if hub.router[oper.destination] != 0 {
@@ -125,49 +151,59 @@ func (hub *MsgHub) processRouterOper() {
 	}
 }
 
-func (conn *Conn) sendMsgLoop(cb func()) {
+func (conn *ClientConn) sendMsgLoop() {
 	defer func() {
 		if err := recover(); err != nil {
 			ERROR.Println(err)
 		}
-		cb()
-		conn.Close()
 	}()
 	var msg Msg
+	var ok bool
 	for {
 		select {
-		case msg = <-conn.wchan:
+		case msg, ok = <-conn.wchan:
+			if !ok {
+				// the channel is closed
+				return
+			}
+			conn.Write(msg.Body())
 		}
-		conn.Write(msg.Body())
+
 	}
 }
 
-func (hub *MsgHub) AddClient(id uint64, typ byte, c net.Conn) {
-	conn := &Conn{id: id, Conn: c, wchan: make(chan Msg, 1)}
-	key := fmt.Sprintf("%d.%d")
-	hub.clients[key] = conn
-	hub.AddRoute(id, typ, hub.id)
+func (hub *MsgHub) AddClient(client *ClientConn) error {
+	if client.Type != 1 && client.Type != 2 {
+		return NoSuchType
+	}
 	var routeMsg RouteControlMsg
+	key := client.toKey()
+	client.wchan = make(chan Msg, 1)
+	hub.clients[key] = client
+	hub.AddRoute(client.Id, client.Type, hub.id)
+	client.hub = hub
 	routeMsg.ControlType = AddRouteControlType
-	routeMsg.Type = typ
-	routeMsg.Id = id
+	routeMsg.Type = client.Type
+	routeMsg.Id = client.Id
 	hub.BordcastMsg(&routeMsg)
-	go conn.sendMsgLoop(func() {
-		delete(hub.clients, key)
-		var msg RouteControlMsg
-		msg.ControlType = AddRouteControlType
-		msg.Type = typ
-		msg.Id = id
-		hub.BordcastMsg(&msg)
-	})
+	go client.sendMsgLoop()
+	return nil
+}
+
+func (hub *MsgHub) RemoveClient(client *ClientConn) {
+	var routeMsg RouteControlMsg
+	key := client.toKey()
+	delete(hub.clients, key)
+	hub.RemoveRoute(client.Id, client.Type)
+	routeMsg.ControlType = RemoveRouteControlType
+	routeMsg.Type = client.Type
+	routeMsg.Id = client.Id
+	hub.BordcastMsg(&routeMsg)
+	close(client.wchan)
 }
 
 func (hub *MsgHub) AddRoute(d uint64, typ byte, id int) error {
-	if id >= len(hub.outgoing) || id < 0 {
-		return OutofServerRange
-	}
-
-	hub.routerOperChan <- &routerOper{destination: d, typ: typ, serverid: id, oper: oper_add}
+	hub.routerOperChan <- &routerOper{destination: d, typ: typ, hubId: id, oper: oper_add}
 	return nil
 }
 
@@ -183,6 +219,7 @@ func NewMsgHub(id int, maxDest uint64, servAddr string) *MsgHub {
 		routerOperChan: make(chan *routerOper),
 		maxDest:        maxDest,
 		servAddr:       servAddr,
+		clients:        make(map[string]*ClientConn, 1024),
 	}
 	go hub.processRouterOper()
 	return hub
@@ -306,7 +343,7 @@ func (hub *MsgHub) outgoingLoop(conn *Conn) {
 		}
 
 		select {
-		case msg = <-conn.wchan:
+		case msg = <-conn.wchan: //the channel will never closed.
 		case <-time.After(2 * time.Second):
 			msg = Ping
 		}
@@ -332,19 +369,20 @@ func (hub *MsgHub) BordcastMsg(msg Msg) {
 }
 
 //we only have 2 bits for mask type.
-func (hub *MsgHub) LocalDispatch(msg *RouteMsg) {
-
-	if conn, ok := hub.clients[fmt.Sprintln("%d.1")]; ok {
+func (hub *MsgHub) LocalDispatch(msg RouteMsg) {
+	key1 := fmt.Sprintf("%d.1", msg.Destination())
+	key2 := fmt.Sprintf("%d.2", msg.Destination())
+	if conn, ok := hub.clients[key1]; ok {
 		conn.wchan <- msg
 	}
 
-	if conn, ok := hub.clients[fmt.Sprintln("%d.2")]; ok {
+	if conn, ok := hub.clients[key2]; ok {
 		conn.wchan <- msg
 	}
 
 }
 
-func (hub *MsgHub) RemoteDispatch(msg *RouteMsg) {
+func (hub *MsgHub) RemoteDispatch(msg RouteMsg) {
 	outgoing := hub.outgoing[msg.Destination()]
 	defer func() {
 		if err := recover(); err != nil {
@@ -360,9 +398,17 @@ func (hub *MsgHub) RemoteDispatch(msg *RouteMsg) {
 	}
 }
 
-func (hub *MsgHub) Dispatch(msg *RouteMsg) {
+func (hub *MsgHub) Dispatch(msg RouteMsg) {
+	if msg == nil {
+		return
+	}
 	dest := msg.Destination()
 	id := int(hub.router[dest] & RouterMask)
+	if id == 0 {
+		//TODO: destination is offline
+		WARN.Println("TODO: destination is offline")
+		return
+	}
 	if hub.id == id {
 		hub.LocalDispatch(msg)
 	} else {
@@ -416,10 +462,9 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 					ERROR.Println(err)
 					return
 				}
-
 			}
 		case RouteMsgType:
-			var msg RouteMsg
+			var msg DeliverMsg
 			if n < 13 {
 				ERROR.Println(UnknownMsg)
 				return
@@ -449,14 +494,13 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 
 func (hub *MsgHub) ListenAndServe() error {
 	var err error
-	var ln net.Listener
 	var c net.Conn
-	ln, err = net.Listen("tcp", hub.servAddr)
+	hub.listener, err = net.Listen("tcp", hub.servAddr)
 	if err != nil {
 		return err
 	}
 	for {
-		if c, err = ln.Accept(); err != nil {
+		if c, err = hub.listener.Accept(); err != nil {
 			return err
 		}
 		go hub.incomingLoop(c)
