@@ -138,7 +138,7 @@ func TestRemoteDispatch(t *testing.T) {
 	hub1.Dispatch(&DeliverMsg{To: 2, Carry: []byte(content2)})
 	hub1.Dispatch(&DeliverMsg{To: 2, Carry: []byte(content2)})
 	hub1.Dispatch(&DeliverMsg{To: 2, Carry: []byte(content2)})
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(3 * time.Second)
 	hub1.RemoveClient(clientConn1)
 	hub2.RemoveClient(clientConn2)
 	clientConn2.Close()

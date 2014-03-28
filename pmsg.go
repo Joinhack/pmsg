@@ -506,7 +506,7 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 			if err != nil {
 				return
 			} else {
-				INFO.Println(c.RemoteAddr().String(), "said:", string(bs))
+				INFO.Println(c.RemoteAddr().String(), "said:", string(bs[:len(bs)-1]))
 			}
 		case ControlMsgType: //cronntrol msg
 			if controlType, err = reader.ReadByte(); err != nil {
