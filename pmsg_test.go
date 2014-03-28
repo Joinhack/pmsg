@@ -115,8 +115,6 @@ func TestRemoteDispatch(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	hub1Addr := fmt.Sprintf("127.0.0.1:%d", hub1.listener.Addr().(*net.TCPAddr).Port)
 	hub2Addr := fmt.Sprintf("127.0.0.1:%d", hub2.listener.Addr().(*net.TCPAddr).Port)
-	hub1.AddOutgoing(2, hub2Addr)
-	hub2.AddOutgoing(1, hub1Addr)
 
 	servAddr := fmt.Sprintf("127.0.0.1:%d", ln.Addr().(*net.TCPAddr).Port)
 	conn1, _ := net.Dial("tcp", servAddr)
@@ -129,6 +127,9 @@ func TestRemoteDispatch(t *testing.T) {
 	clientConn2 := &ClientConn{Id: 2, Type: 1, Conn: conn2}
 	hub1.AddClient(clientConn1)
 	hub2.AddClient(clientConn2)
+	time.Sleep(10 * time.Millisecond)
+	hub1.AddOutgoing(2, hub2Addr)
+	hub2.AddOutgoing(1, hub1Addr)
 	time.Sleep(10 * time.Millisecond)
 	content1 := "hi1"
 	content2 := "hi2"

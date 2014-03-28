@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -105,6 +106,7 @@ const (
 	RouterTypeMask = 0x80
 	oper_add       = 0
 	oper_remove    = 1
+	oper_clearHub  = 3
 )
 
 type MsgHub struct {
@@ -116,36 +118,45 @@ type MsgHub struct {
 	incoming       [RouterMaskBits]*Conn
 	clients        map[string]*ClientConn
 	routerOperChan chan *routerOper
+	_clientsMutex  *sync.Mutex
 	listener       net.Listener
 }
 
 func (hub *MsgHub) processRouterOper() {
+	var oper *routerOper
+	var ok bool
 	for {
 		select {
-		case oper, ok := <-hub.routerOperChan:
-			if !ok {
-				//channel closed
-				return
+		case oper, ok = <-hub.routerOperChan:
+		}
+		if !ok {
+			//channel closed
+			return
+		}
+		if oper.destination > hub.maxDest {
+			ERROR.Println("invalidate operation")
+			continue
+		}
+		switch oper.oper {
+		case oper_add:
+			v := (oper.typ << 6) | (RouterMask & byte(oper.hubId))
+			hub.router[oper.destination] = v
+		case oper_remove:
+			if hub.router[oper.destination] != 0 {
+				r := hub.router[oper.destination]
+				typ := RouterTypeMask & r
+				v := typ & ^(oper.typ << 6)
+				if v == 0 {
+					hub.router[oper.destination] = 0
+				} else {
+					hub.router[oper.destination] = (RouterMask & r) | v
+				}
 			}
-			if oper.destination > hub.maxDest {
-				ERROR.Println("invalidate operation")
-				continue
-			}
-			switch oper.oper {
-			case oper_add:
-
-				v := (oper.typ << 6) | (RouterMask & byte(oper.hubId))
-				hub.router[oper.destination] = v
-			case oper_remove:
-				if hub.router[oper.destination] != 0 {
-					r := hub.router[oper.destination]
-					typ := RouterTypeMask & r
-					v := typ & ^(oper.typ << 6)
-					if v == 0 {
-						hub.router[oper.destination] = 0
-					} else {
-						hub.router[oper.destination] = (RouterMask & r) | v
-					}
+		case oper_clearHub:
+			sid := byte(oper.hubId)
+			for i, b := range hub.router {
+				if b&RouterMask == sid {
+					hub.router[i] = 0
 				}
 			}
 		}
@@ -180,7 +191,9 @@ func (hub *MsgHub) AddClient(client *ClientConn) error {
 	var routeMsg RouteControlMsg
 	key := client.toKey()
 	client.wchan = make(chan Msg, 1)
+	hub._clientsMutex.Lock()
 	hub.clients[key] = client
+	hub._clientsMutex.Unlock()
 	hub.AddRoute(client.Id, client.Type, hub.id)
 	routeMsg.ControlType = AddRouteControlType
 	routeMsg.Type = client.Type
@@ -193,7 +206,9 @@ func (hub *MsgHub) AddClient(client *ClientConn) error {
 func (hub *MsgHub) RemoveClient(client *ClientConn) {
 	var routeMsg RouteControlMsg
 	key := client.toKey()
+	hub._clientsMutex.Lock()
 	delete(hub.clients, key)
+	hub._clientsMutex.Unlock()
 	hub.RemoveRoute(client.Id, client.Type)
 	routeMsg.ControlType = RemoveRouteControlType
 	routeMsg.Type = client.Type
@@ -220,7 +235,9 @@ func NewMsgHub(id int, maxDest uint64, servAddr string) *MsgHub {
 		maxDest:        maxDest,
 		servAddr:       servAddr,
 		clients:        make(map[string]*ClientConn, 1024),
+		_clientsMutex:  &sync.Mutex{},
 	}
+
 	go hub.processRouterOper()
 	return hub
 }
@@ -236,7 +253,7 @@ type WhoamIMsg struct {
 
 type RouteControlMsg struct {
 	ControlType int
-	Type        uint8  //0x1 0x2
+	Type        byte   //0x1 0x2
 	Id          uint64 //client Id
 }
 
@@ -327,6 +344,21 @@ func (c *StringMsg) Body() []byte {
 
 var Ping = NewStringMsg("PING")
 
+func (hub *MsgHub) rebuildRemoteRouter(conn *Conn) error {
+	hub._clientsMutex.Lock()
+	defer hub._clientsMutex.Unlock()
+	var routeControlMsg RouteControlMsg
+	for _, client := range hub.clients {
+		routeControlMsg.ControlType = AddRouteControlType
+		routeControlMsg.Type = client.Type
+		routeControlMsg.Id = client.Id
+		if _, err := conn.Write(routeControlMsg.Bytes()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (hub *MsgHub) outgoingLoop(conn *Conn) {
 	var err error
 	var msg Msg
@@ -338,8 +370,16 @@ func (hub *MsgHub) outgoingLoop(conn *Conn) {
 				time.Sleep(2 * time.Second)
 				continue
 			}
-			//regist self in other hub
-			msg = NewWhoamIMsg(hub.id)
+			//register self in other hub
+			whoami := NewWhoamIMsg(hub.id)
+			_, err = conn.Write(whoami.Bytes())
+			if err != nil {
+				goto ERROR
+			}
+			//rebuild remote router
+			if err = hub.rebuildRemoteRouter(conn); err != nil {
+				goto ERROR
+			}
 		}
 
 		if msg != nil {
@@ -353,6 +393,7 @@ func (hub *MsgHub) outgoingLoop(conn *Conn) {
 		}
 	WRITE:
 		_, err = conn.Write(msg.Bytes())
+	ERROR:
 		if err != nil {
 			ERROR.Println(err)
 			//close connection and reconnection later
@@ -360,6 +401,7 @@ func (hub *MsgHub) outgoingLoop(conn *Conn) {
 			conn.Conn = nil
 			continue
 		}
+		//if no err clear msg
 		msg = nil
 	}
 }
@@ -376,6 +418,8 @@ func (hub *MsgHub) BordcastMsg(msg Msg) {
 func (hub *MsgHub) LocalDispatch(msg RouteMsg) {
 	key1 := fmt.Sprintf("%d.1", msg.Destination())
 	key2 := fmt.Sprintf("%d.2", msg.Destination())
+	hub._clientsMutex.Lock()
+	defer hub._clientsMutex.Unlock()
 	if conn, ok := hub.clients[key1]; ok {
 		conn.wchan <- msg
 	}
@@ -420,6 +464,10 @@ func (hub *MsgHub) Dispatch(msg RouteMsg) {
 	}
 }
 
+func (hub *MsgHub) clearRouter(svrid int) {
+	hub.routerOperChan <- &routerOper{hubId: svrid, oper: oper_clearHub}
+}
+
 func (hub *MsgHub) incomingLoop(c net.Conn) {
 	var err error
 	var n int
@@ -458,7 +506,7 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 			if err != nil {
 				return
 			} else {
-				INFO.Println(c, "said:", string(bs))
+				INFO.Println(c.RemoteAddr().String(), "said:", string(bs))
 			}
 		case ControlMsgType: //cronntrol msg
 			if controlType, err = reader.ReadByte(); err != nil {
