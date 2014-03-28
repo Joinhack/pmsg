@@ -140,6 +140,7 @@ func (hub *MsgHub) processRouterOper() {
 		switch oper.oper {
 		case oper_add:
 			v := (oper.typ << 6) | (RouterMask & byte(oper.hubId))
+			//TODO: if the id is register in local, we should kick it off. Should add the testcase
 			hub.router[oper.destination] = v
 		case oper_remove:
 			if hub.router[oper.destination] != 0 {
