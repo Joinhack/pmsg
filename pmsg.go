@@ -1,9 +1,11 @@
 package pmsg
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -11,7 +13,7 @@ import (
 )
 
 const (
-	StringMsgType  = iota //like ping, framed msg
+	StringMsgType  = iota //like ping, framed msg end with \n
 	ControlMsgType        //framed msg
 	RouteMsgType
 )
@@ -263,7 +265,7 @@ func (msg *RouteControlMsg) Bytes() []byte {
 	bs := make([]byte, msg.Len())
 	bs[0] = ControlMsgType
 	bs[1] = byte(msg.ControlType)
-	bs[2] = msg.Type & RouterTypeMask
+	bs[2] = msg.Type
 	binary.LittleEndian.PutUint64(bs[3:], msg.Id)
 	return bs
 }
@@ -284,8 +286,17 @@ func (msg *WhoamIMsg) Bytes() []byte {
 	return bs
 }
 
-func (msg *WhoamIMsg) Unmarshal(bs []byte) error {
+func (msg *WhoamIMsg) Body() []byte {
+	return msg.Bytes()
+}
 
+func (msg *WhoamIMsg) Unmarshal(reader io.Reader) error {
+	var bs [3]byte
+	if n, err := reader.Read(bs[:]); err != nil {
+		return err
+	} else if n < msg.Len() {
+		return UnknownFramedMsg
+	}
 	if len(bs) != msg.Len() {
 		return UnknownFramedMsg
 	}
@@ -301,9 +312,10 @@ func (msg *WhoamIMsg) Unmarshal(bs []byte) error {
 
 func NewStringMsg(content string) *StringMsg {
 	msg := &StringMsg{}
-	msg.bytes = make([]byte, 1+len(content))
+	msg.bytes = make([]byte, 2+len(content))
 	msg.bytes[0] = StringMsgType
 	copy(msg.bytes[1:], []byte(content))
+	msg.bytes[len(msg.bytes)-1] = '\n'
 	return msg
 }
 
@@ -329,13 +341,7 @@ func (hub *MsgHub) outgoingLoop(conn *Conn) {
 				continue
 			}
 			//regist self in other hub
-			_, err = conn.Write(NewWhoamIMsg(hub.id).Bytes())
-			if err != nil {
-				ERROR.Println("write error, detail:", err)
-				conn.Close()
-				conn.Conn = nil
-				continue
-			}
+			msg = NewWhoamIMsg(hub.id)
 		}
 
 		if msg != nil {
@@ -417,40 +423,58 @@ func (hub *MsgHub) Dispatch(msg RouteMsg) {
 }
 
 func (hub *MsgHub) incomingLoop(c net.Conn) {
-	var buf = make([]byte, 4096) //framed size
 	var err error
 	var n int
-	n, err = c.Read(buf)
-	var whoami WhoamIMsg
-	if n != whoami.Len() {
+	reader := bufio.NewReader(c)
+
+	defer func() {
 		c.Close()
-		ERROR.Println(UnknownFramedMsg)
+		if err != nil {
+			ERROR.Println(err)
+		}
+	}()
+
+	var whoami WhoamIMsg
+	if err = whoami.Unmarshal(reader); err != nil {
 		return
 	}
 	conn := &Conn{id: uint64(whoami.Who), Conn: c}
 	if hub.incoming[conn.id] != nil {
 		hub.incoming[conn.id].Close()
 	}
-	defer func() {
-		conn.Close()
-		hub.incoming[conn.id] = nil
-	}()
 	hub.incoming[conn.id] = conn
+	defer func() { hub.incoming[conn.id] = nil }()
+	var msgType byte
+	var controlType byte
 	for {
-		n, err = conn.Read(buf)
+		msgType, err = reader.ReadByte()
 		if err != nil {
 			ERROR.Println("read from incoming error, detail:", err)
 			return
 		}
-		switch buf[0] {
+		switch msgType {
 		case StringMsgType:
 			//drop msg, should be ping
+			var bs []byte
+			bs, err = reader.ReadSlice('\n')
+			if err != nil {
+				return
+			} else {
+				INFO.Println(c, "said:", string(bs))
+			}
 		case ControlMsgType: //cronntrol msg
-			switch buf[1] {
+			if controlType, err = reader.ReadByte(); err != nil {
+				return
+			}
+			switch controlType {
 			case AddRouteControlType, RemoveRouteControlType:
 				var msg RouteControlMsg
-				if err = msg.Unmarshal(buf[:n]); err != nil {
-					ERROR.Println(err)
+				var buf = make([]byte, msg.Len())
+				buf[0] = ControlMsgType
+				buf[1] = controlType
+				reader.Read(buf[2:])
+
+				if err = msg.Unmarshal(buf); err != nil {
 					return
 				}
 				if msg.ControlType == AddRouteControlType {
@@ -459,31 +483,26 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 					err = hub.RemoveRoute(msg.Id, msg.Type)
 				}
 				if err != nil {
-					ERROR.Println(err)
 					return
 				}
 			}
 		case RouteMsgType:
 			var msg DeliverMsg
-			if n < 13 {
-				ERROR.Println(UnknownMsg)
+			if err = binary.Read(reader, binary.LittleEndian, &msg.To); err != nil {
 				return
 			}
-			msg.To = binary.LittleEndian.Uint64(buf[1:])
-			l := binary.LittleEndian.Uint32(buf[9:])
+			var l uint32
+			if err = binary.Read(reader, binary.LittleEndian, &l); err != nil {
+				return
+			}
 			body := make([]byte, l)
-			copy(body, buf[13:n])
-			var rn uint32 = uint32(n - 13)
-
-			for {
-				n, err = conn.Read(body[rn:])
-				if err != nil {
-					ERROR.Println(err)
+			n = 0
+			c := 0
+			for c < int(l) {
+				if n, err = reader.Read(body[n:]); err != nil {
 					return
 				}
-				if rn == l {
-					break
-				}
+				c += n
 			}
 			msg.Carry = body
 			hub.LocalDispatch(&msg)
@@ -507,12 +526,12 @@ func (hub *MsgHub) ListenAndServe() error {
 	}
 }
 
-func (hub *MsgHub) AddOutgoing(id int, addr string) (conn *Conn, err error) {
+func (hub *MsgHub) AddOutgoing(id int, addr string) (err error) {
 	if id >= len(hub.outgoing) || id < 0 {
 		err = OutofServerRange
 		return
 	}
-	conn = &Conn{id: uint64(id), address: addr, wchan: make(chan Msg, 1)}
+	conn := &Conn{id: uint64(id), address: addr, wchan: make(chan Msg, 1)}
 	hub.outgoing[id] = conn
 	go hub.outgoingLoop(conn)
 	return
