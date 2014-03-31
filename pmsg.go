@@ -150,7 +150,8 @@ func (hub *MsgHub) processRouterOper() {
 				var ok bool
 				hubid := r & RouterMask
 				if int(hubid) == hub.id {
-					if client, ok = hub.clients[key]; ok {
+					client, ok = hub.clients[key]
+					if ok {
 						client.Kickoff()
 					}
 				}
@@ -159,7 +160,9 @@ func (hub *MsgHub) processRouterOper() {
 				//TODO: send reconnection protocol to other device.
 			}
 			if oper.client != nil {
+				hub._clientsMutex.Lock()
 				hub.clients[key] = oper.client
+				hub._clientsMutex.Unock()
 			}
 			hub.router[oper.destination] = v
 		case oper_remove:
