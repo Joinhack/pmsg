@@ -87,6 +87,7 @@ type Client interface {
 	Type() byte
 	SendMsg(msg Msg)
 	Kickoff() //invoke by hub.
+	IsKickoff() bool
 }
 
 type routerOper struct {
@@ -94,6 +95,7 @@ type routerOper struct {
 	typ         byte
 	hubId       int
 	oper        int
+	client      Client
 }
 
 const (
@@ -114,8 +116,8 @@ type MsgHub struct {
 	incoming       [RouterMaskBits]*Conn
 	clients        map[string]Client
 	routerOperChan chan *routerOper
-	_clientsMutex  *sync.Mutex
 	listener       net.Listener
+	_clientsMutex  *sync.Mutex
 }
 
 func toKey(id uint64, typ byte) string {
@@ -142,22 +144,39 @@ func (hub *MsgHub) processRouterOper() {
 			v := (oper.typ << 6) | (RouterMask & byte(oper.hubId))
 			//Kickoff
 			r := hub.router[oper.destination]
-			if r != 0 && r&RouterMask == byte(hub.id) {
-				client := hub.clients[toKey(oper.destination, oper.typ)]
-				client.Kickoff()
+			key := toKey(oper.destination, oper.typ)
+			if r != 0 {
+				var client Client
+				var ok bool
+				hubid := r & RouterMask
+				if int(hubid) == hub.id {
+					if client, ok = hub.clients[key]; ok {
+						client.Kickoff()
+					}
+				}
+
 				WARN.Println("TODO: send reconnection protocol to other device.")
 				//TODO: send reconnection protocol to other device.
 			}
+			if oper.client != nil {
+				hub.clients[key] = oper.client
+			}
 			hub.router[oper.destination] = v
 		case oper_remove:
-			if hub.router[oper.destination] != 0 {
-				r := hub.router[oper.destination]
+			r := hub.router[oper.destination]
+			if r != 0 {
 				typ := RouterTypeMask & r
 				v := typ & ^(oper.typ << 6)
+				hubid := r & RouterMask
+				if int(hubid) == hub.id {
+					key := toKey(oper.destination, oper.typ)
+					delete(hub.clients, key)
+				}
+
 				if v == 0 {
 					hub.router[oper.destination] = 0
 				} else {
-					hub.router[oper.destination] = (RouterMask & r) | v
+					hub.router[oper.destination] = (hubid) | v
 				}
 			}
 		case oper_clearHub:
@@ -173,6 +192,7 @@ func (hub *MsgHub) processRouterOper() {
 
 type SimpleClientConn struct {
 	net.Conn
+	isKickoff  bool
 	ClientId   uint64
 	ClientType byte
 	Wchan      chan Msg
@@ -183,14 +203,29 @@ func NewSimpleClientConn(conn net.Conn, id uint64, typ byte) *SimpleClientConn {
 		Conn:       conn,
 		ClientId:   id,
 		ClientType: typ,
+		isKickoff:  false,
 		Wchan:      make(chan Msg, 1),
 	}
 	go sconn.SendMsgLoop()
 	return sconn
 }
 
-func (conn *SimpleClientConn) Kickoff() {
+func (conn *SimpleClientConn) IsKickoff() bool {
+	return conn.isKickoff
+}
+
+func (conn *SimpleClientConn) CloseWchan() {
 	close(conn.Wchan)
+}
+
+func (conn *SimpleClientConn) Kickoff() {
+	conn.isKickoff = true
+	defer func() {
+		if err := recover(); err != nil {
+			ERROR.Println(err)
+		}
+	}()
+	conn.Conn.Close()
 }
 
 func (conn *SimpleClientConn) Id() uint64 {
@@ -233,15 +268,11 @@ func (hub *MsgHub) AddClient(client Client) error {
 	var routeMsg RouteControlMsg
 	clientId := client.Id()
 	clientType := client.Type()
-	key := toKey(clientId, clientType)
-	hub._clientsMutex.Lock()
-	hub.clients[key] = client
-	hub._clientsMutex.Unlock()
-	hub.AddRoute(clientId, clientType, hub.id)
+	hub.AddRoute(clientId, clientType, hub.id, client)
 	routeMsg.ControlType = AddRouteControlType
 	routeMsg.Type = clientType
 	routeMsg.Id = clientId
-	hub.BordcastMsg(&routeMsg)
+	hub.bordcastMsg(&routeMsg)
 	return nil
 }
 
@@ -249,19 +280,18 @@ func (hub *MsgHub) RemoveClient(client Client) {
 	var routeMsg RouteControlMsg
 	clientId := client.Id()
 	clientType := client.Type()
-	key := toKey(clientId, clientType)
-	hub._clientsMutex.Lock()
-	delete(hub.clients, key)
-	hub._clientsMutex.Unlock()
+	if client.IsKickoff() {
+		return
+	}
 	hub.RemoveRoute(clientId, clientType)
 	routeMsg.ControlType = RemoveRouteControlType
 	routeMsg.Type = clientType
 	routeMsg.Id = clientId
-	hub.BordcastMsg(&routeMsg)
+	hub.bordcastMsg(&routeMsg)
 }
 
-func (hub *MsgHub) AddRoute(d uint64, typ byte, id int) error {
-	hub.routerOperChan <- &routerOper{destination: d, typ: typ, hubId: id, oper: oper_add}
+func (hub *MsgHub) AddRoute(d uint64, typ byte, id int, client Client) error {
+	hub.routerOperChan <- &routerOper{destination: d, typ: typ, hubId: id, oper: oper_add, client: client}
 	return nil
 }
 
@@ -410,8 +440,7 @@ func (hub *MsgHub) outgoingLoop(conn *Conn) {
 			conn.Conn, err = net.Dial("tcp", conn.address)
 			if err != nil {
 				ERROR.Println("connection to", conn.address, "fail, retry after 2 sec.")
-				time.Sleep(2 * time.Second)
-				continue
+				goto GETMSG
 			}
 			//register self in other hub
 			whoami := NewWhoamIMsg(hub.id)
@@ -428,11 +457,15 @@ func (hub *MsgHub) outgoingLoop(conn *Conn) {
 		if msg != nil {
 			goto WRITE
 		}
-
+	GETMSG:
 		select {
 		case msg = <-conn.wchan: //the channel will never closed.
 		case <-time.After(2 * time.Second):
 			msg = Ping
+		}
+		if conn.Conn == nil {
+			//if the connection is offline, I will drop msg.
+			continue
 		}
 	WRITE:
 		_, err = conn.Write(msg.Bytes())
@@ -449,9 +482,10 @@ func (hub *MsgHub) outgoingLoop(conn *Conn) {
 	}
 }
 
-func (hub *MsgHub) BordcastMsg(msg Msg) {
+func (hub *MsgHub) bordcastMsg(msg *RouteControlMsg) {
 	for _, conn := range hub.outgoing {
-		if conn != nil {
+
+		if conn != nil && conn.Conn != nil {
 			conn.wchan <- msg
 		}
 	}
@@ -459,22 +493,35 @@ func (hub *MsgHub) BordcastMsg(msg Msg) {
 
 //we only have 2 bits for mask type.
 func (hub *MsgHub) LocalDispatch(msg RouteMsg) {
+	defer func() {
+		if err := recover(); err != nil {
+			ERROR.Println(err)
+		}
+	}()
 	key1 := fmt.Sprintf("%d.1", msg.Destination())
 	key2 := fmt.Sprintf("%d.2", msg.Destination())
+	var conn Client
+	var ok bool
 	hub._clientsMutex.Lock()
-	defer hub._clientsMutex.Unlock()
-	if conn, ok := hub.clients[key1]; ok {
+	conn, ok = hub.clients[key1]
+	hub._clientsMutex.Unlock()
+	if ok {
 		conn.SendMsg(msg)
 	}
 
-	if conn, ok := hub.clients[key2]; ok {
+	hub._clientsMutex.Lock()
+	conn, ok = hub.clients[key2]
+	hub._clientsMutex.Unlock()
+
+	if ok {
 		conn.SendMsg(msg)
 	}
 
+	//TODO: maybe some msg dropped
 }
 
-func (hub *MsgHub) RemoteDispatch(msg RouteMsg) {
-	outgoing := hub.outgoing[msg.Destination()]
+func (hub *MsgHub) RemoteDispatch(id int, msg RouteMsg) {
+	outgoing := hub.outgoing[id]
 	defer func() {
 		if err := recover(); err != nil {
 			//TODO: if outgoing write channel close,  should remove the outgoing from hub
@@ -503,7 +550,7 @@ func (hub *MsgHub) Dispatch(msg RouteMsg) {
 	if hub.id == id {
 		hub.LocalDispatch(msg)
 	} else {
-		hub.RemoteDispatch(msg)
+		hub.RemoteDispatch(id, msg)
 	}
 }
 
@@ -566,7 +613,7 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 					return
 				}
 				if msg.ControlType == AddRouteControlType {
-					err = hub.AddRoute(msg.Id, msg.Type, int(conn.id))
+					err = hub.AddRoute(msg.Id, msg.Type, int(conn.id), nil)
 				} else {
 					err = hub.RemoveRoute(msg.Id, msg.Type)
 				}
