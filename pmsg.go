@@ -266,7 +266,7 @@ func (conn *SimpleClientConn) SendMsgLoop() {
 	}
 }
 
-func (hub *MsgHub) AddClient(client Client) error {
+func (hub *MsgHub) AddClient(client Client) {
 	var routeMsg RouteControlMsg
 	clientId := client.Id()
 	clientType := client.Type()
@@ -275,7 +275,6 @@ func (hub *MsgHub) AddClient(client Client) error {
 	routeMsg.Type = clientType
 	routeMsg.Id = clientId
 	hub.bordcastMsg(&routeMsg)
-	return nil
 }
 
 func (hub *MsgHub) RemoveClient(client Client) {
@@ -292,14 +291,12 @@ func (hub *MsgHub) RemoveClient(client Client) {
 	hub.bordcastMsg(&routeMsg)
 }
 
-func (hub *MsgHub) AddRoute(d uint64, typ byte, id int, client Client) error {
+func (hub *MsgHub) AddRoute(d uint64, typ byte, id int, client Client) {
 	hub.routerOperChan <- &routerOper{destination: d, typ: typ, hubId: id, oper: oper_add, client: client}
-	return nil
 }
 
-func (hub *MsgHub) RemoveRoute(d uint64, typ byte) error {
+func (hub *MsgHub) RemoveRoute(d uint64, typ byte) {
 	hub.routerOperChan <- &routerOper{destination: d, typ: typ, oper: oper_remove}
-	return nil
 }
 
 func NewMsgHub(id int, maxDest uint64, servAddr string) *MsgHub {
@@ -617,12 +614,9 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 					return
 				}
 				if msg.ControlType == AddRouteControlType {
-					err = hub.AddRoute(msg.Id, msg.Type, int(conn.id), nil)
+					hub.AddRoute(msg.Id, msg.Type, int(conn.id), nil)
 				} else {
-					err = hub.RemoveRoute(msg.Id, msg.Type)
-				}
-				if err != nil {
-					return
+					hub.RemoveRoute(msg.Id, msg.Type)
 				}
 			}
 		case RouteMsgType:
