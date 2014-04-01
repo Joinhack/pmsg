@@ -77,9 +77,8 @@ func (msg *DeliverMsg) Bytes() []byte {
 
 type Conn struct {
 	net.Conn
-	address string
-	wchan   chan Msg
-	id      uint64
+	wchan chan Msg
+	id    uint64
 }
 
 type Client interface {
@@ -162,7 +161,7 @@ func (hub *MsgHub) processRouterOper() {
 			if oper.client != nil {
 				hub._clientsMutex.Lock()
 				hub.clients[key] = oper.client
-				hub._clientsMutex.Unock()
+				hub._clientsMutex.Unlock()
 			}
 			hub.router[oper.destination] = v
 		case oper_remove:
@@ -435,14 +434,16 @@ func (hub *MsgHub) rebuildRemoteRouter(conn *Conn) error {
 	return nil
 }
 
-func (hub *MsgHub) outgoingLoop(conn *Conn) {
+func (hub *MsgHub) outgoingLoop(addr string, id uint64) {
 	var err error
 	var msg Msg
+	conn := &Conn{id: uint64(id), wchan: make(chan Msg, 1)}
+	hub.outgoing[id] = conn
 	for {
 		if conn.Conn == nil {
-			conn.Conn, err = net.Dial("tcp", conn.address)
+			conn.Conn, err = net.Dial("tcp", addr)
 			if err != nil {
-				ERROR.Println("connection to", conn.address, "fail, retry after 2 sec.")
+				ERROR.Println("connection to", addr, "fail, retry after 2 sec.")
 				goto GETMSG
 			}
 			//register self in other hub
@@ -669,8 +670,6 @@ func (hub *MsgHub) AddOutgoing(id int, addr string) (err error) {
 		err = OutofServerRange
 		return
 	}
-	conn := &Conn{id: uint64(id), address: addr, wchan: make(chan Msg, 1)}
-	hub.outgoing[id] = conn
-	go hub.outgoingLoop(conn)
+	go hub.outgoingLoop(addr, uint64(id))
 	return
 }
