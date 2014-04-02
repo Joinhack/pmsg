@@ -30,6 +30,8 @@ var (
 
 	UnknownFramedMsg = errors.New("unknow framed msg")
 
+	NeedRedirect = errors.New("the client need redirect")
+
 	NoSuchType = errors.New("No such type")
 
 	UnknownMsg = errors.New("unknow msg")
@@ -86,6 +88,7 @@ type Client interface {
 	Type() byte
 	SendMsg(msg Msg)
 	Kickoff() //invoke by hub.
+	Redirect(hubid int)
 	IsKickoff() bool
 }
 
@@ -100,7 +103,7 @@ type routerOper struct {
 const (
 	RouterMaskBits = 1 << 6
 	RouterMask     = 0x3f
-	RouterTypeMask = 0x80
+	RouterTypeMask = 0xc0
 	oper_add       = 0
 	oper_remove    = 1
 	oper_clearHub  = 3
@@ -153,10 +156,15 @@ func (hub *MsgHub) processRouterOper() {
 					if ok {
 						client.Kickoff()
 					}
+				} else {
+					//it different dev registed in different hub, I hope i always in the same hub
+					if oper.client != nil &&
+						oper.typ<<6 != r&RouterTypeMask {
+						//it never happen I think
+						WARN.Println("redirect client")
+						oper.client.Redirect(int(hubid))
+					}
 				}
-
-				WARN.Println("TODO: send reconnection protocol to other device.")
-				//TODO: send reconnection protocol to other device.
 			}
 			if oper.client != nil {
 				hub._clientsMutex.Lock()
@@ -230,6 +238,9 @@ func (conn *SimpleClientConn) Kickoff() {
 	conn.Conn.Close()
 }
 
+func (conn *SimpleClientConn) Redirect(i int) {
+}
+
 func (conn *SimpleClientConn) Id() uint64 {
 	return conn.ClientId
 }
@@ -246,13 +257,15 @@ func (conn *SimpleClientConn) SendMsg(msg Msg) {
 }
 
 func (conn *SimpleClientConn) SendMsgLoop() {
+	var msg Msg
+	var ok bool
+	var err error
 	defer func() {
 		if err := recover(); err != nil {
 			ERROR.Println(err)
 		}
 	}()
-	var msg Msg
-	var ok bool
+
 	for {
 		select {
 		case msg, ok = <-conn.Wchan:
@@ -260,21 +273,38 @@ func (conn *SimpleClientConn) SendMsgLoop() {
 				// the channel is closed
 				return
 			}
-			conn.Write(msg.Body())
+			if _, err = conn.Write(msg.Body()); err != nil {
+				ERROR.Println(err)
+				conn.Conn.Close()
+				return
+			}
 		}
 
 	}
 }
 
-func (hub *MsgHub) AddClient(client Client) {
+type RedirectError struct {
+	HubId int
+}
+
+func (e *RedirectError) Error() string {
+	return fmt.Sprintf("redirect to hub %d", e.HubId)
+}
+
+func (hub *MsgHub) AddClient(client Client) error {
 	var routeMsg RouteControlMsg
 	clientId := client.Id()
 	clientType := client.Type()
+	r := hub.router[client.Id()]
+	if r != 0 && int(r&RouterMask) != hub.id && r&RouterTypeMask != client.Type()<<6 {
+		return &RedirectError{int(r & RouterMask)}
+	}
 	hub.AddRoute(clientId, clientType, hub.id, client)
 	routeMsg.ControlType = AddRouteControlType
 	routeMsg.Type = clientType
 	routeMsg.Id = clientId
 	hub.bordcastMsg(&routeMsg)
+	return nil
 }
 
 func (hub *MsgHub) RemoveClient(client Client) {

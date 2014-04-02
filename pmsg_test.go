@@ -71,8 +71,12 @@ func TestLocalDispatch(t *testing.T) {
 
 	clientConn1 := NewSimpleClientConn(conn1, 1, 1)
 	clientConn2 := NewSimpleClientConn(conn2, 2, 1)
-	hub.AddClient(clientConn1)
-	hub.AddClient(clientConn2)
+	if err := hub.AddClient(clientConn1); err != nil {
+		panic(err)
+	}
+	if err := hub.AddClient(clientConn2); err != nil {
+		panic(err)
+	}
 	time.Sleep(10 * time.Millisecond)
 	content1 := "hi1"
 	content2 := "hi2"
@@ -129,11 +133,16 @@ func TestKickoffDispatch(t *testing.T) {
 	clientConn2 := NewSimpleClientConn(conn2, 1, 1)
 	hub1.AddOutgoing(2, hub2Addr)
 	hub2.AddOutgoing(1, hub1Addr)
-	hub1.AddClient(clientConn1)
+	if err := hub1.AddClient(clientConn1); err != nil {
+		panic(err)
+	}
 	time.Sleep(1 * time.Millisecond)
-	hub2.AddClient(clientConn2)
+	if err := hub2.AddClient(clientConn2); err != nil {
+		panic(err)
+	}
 
-	time.Sleep(100 * time.Millisecond)
+	t.Log(hub1.router[1], hub2.router[1])
+	time.Sleep(2 * time.Millisecond)
 	if hub1.router[1]&RouterMask != hub2.router[1]&RouterMask {
 		t.Fail()
 	}
