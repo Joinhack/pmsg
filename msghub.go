@@ -101,13 +101,16 @@ func (hub *MsgHub) processRouterOper() {
 					if ok {
 						client.Kickoff()
 					}
-				} else {
-					//it different dev registed in different hub, I hope i always in the same hub
-					if oper.client != nil &&
-						oper.typ<<6 != r&RouterTypeMask {
+				}
+
+				//it different dev registed in different hub, I hope i always in the same hub
+				if int(hubid) != oper.hubId && oper.typ<<6 != r&RouterTypeMask {
+					if oper.client != nil {
 						//it never happen I think
 						WARN.Println("redirect client")
 						oper.client.Redirect(int(hubid))
+					} else {
+						WARN.Println("come from other hub, I don't know how to do")
 					}
 				}
 			}
