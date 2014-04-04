@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -24,6 +25,8 @@ var (
 	UnknownMsg = errors.New("unknow msg")
 
 	OutOfHubIdRange = errors.New("Out of hub id range")
+
+	OutOfMaxRange = errors.New("Out of max range")
 
 	TRACE *log.Logger = log.New(os.Stdout, "TRACE ", log.Ldate|log.Ltime|log.Lshortfile)
 	WARN  *log.Logger = log.New(os.Stdout, "WARN ", log.Ldate|log.Ltime|log.Lshortfile)
@@ -56,15 +59,18 @@ const (
 
 type MsgHub struct {
 	id             int
-	maxDest        uint64
+	maxRange       uint64
 	router         []byte
+	offlineRouter  []byte
 	servAddr       string
 	outgoing       [RouterMaskBits]*Conn
 	incoming       [RouterMaskBits]*Conn
 	clients        map[string]Client
 	routerOperChan chan *routerOper
 	listener       net.Listener
+	dropCount      uint64
 	_clientsMutex  *sync.Mutex
+	*StateNotifer
 }
 
 func toKey(id uint64, typ byte) string {
@@ -82,16 +88,18 @@ func (hub *MsgHub) processRouterOper() {
 			//channel closed
 			return
 		}
-		if oper.destination > hub.maxDest {
+		if oper.destination > hub.maxRange {
 			ERROR.Println("invalidate operation")
 			continue
 		}
+
 		switch oper.oper {
 		case oper_add:
 			v := (oper.typ << 6) | (RouterMask & byte(oper.hubId))
 			//Kickoff
 			r := hub.router[oper.destination]
 			key := toKey(oper.destination, oper.typ)
+			var logonEvent bool = true
 			if r != 0 {
 				var client Client
 				var ok bool
@@ -100,6 +108,7 @@ func (hub *MsgHub) processRouterOper() {
 					client, ok = hub.clients[key]
 					if ok {
 						client.Kickoff()
+						logonEvent = false
 					}
 				}
 
@@ -109,6 +118,7 @@ func (hub *MsgHub) processRouterOper() {
 						//it never happen I think
 						WARN.Println("redirect client")
 						oper.client.Redirect(int(hubid))
+						continue
 					} else {
 						WARN.Println("come from other hub, I don't know how to do")
 					}
@@ -118,6 +128,9 @@ func (hub *MsgHub) processRouterOper() {
 				hub._clientsMutex.Lock()
 				hub.clients[key] = oper.client
 				hub._clientsMutex.Unlock()
+			}
+			if logonEvent {
+				hub.notifyLogon(oper.destination, oper.typ)
 			}
 			hub.router[oper.destination] = v
 		case oper_remove:
@@ -130,7 +143,7 @@ func (hub *MsgHub) processRouterOper() {
 					key := toKey(oper.destination, oper.typ)
 					delete(hub.clients, key)
 				}
-
+				hub.notifyLogoff(oper.destination, oper.typ)
 				if v == 0 {
 					hub.router[oper.destination] = 0
 				} else {
@@ -141,6 +154,15 @@ func (hub *MsgHub) processRouterOper() {
 			sid := byte(oper.hubId)
 			for i, b := range hub.router {
 				if b&RouterMask == sid {
+					if b != 0 {
+						typBit := (b & RouterMask) >> 6
+						if typBit&0x01 > 0 {
+							hub.notifyLogoff(uint64(i), 0x1)
+						}
+						if typBit&0x02 > 0 {
+							hub.notifyLogoff(uint64(i), 0x2)
+						}
+					}
 					hub.router[i] = 0
 				}
 			}
@@ -186,19 +208,34 @@ func (hub *MsgHub) RemoveRoute(d uint64, typ byte) {
 	hub.routerOperChan <- &routerOper{destination: d, typ: typ, oper: oper_remove}
 }
 
-func NewMsgHub(id int, maxDest uint64, servAddr string) *MsgHub {
+func NewMsgHub(id int, maxRange uint64, servAddr string) *MsgHub {
 	hub := &MsgHub{
 		id:             id,
-		router:         make([]byte, maxDest),
+		router:         make([]byte, maxRange),
+		offlineRouter:  make([]byte, maxRange),
 		routerOperChan: make(chan *routerOper),
-		maxDest:        maxDest,
+		maxRange:       maxRange,
 		servAddr:       servAddr,
 		clients:        make(map[string]Client, 1024),
 		_clientsMutex:  &sync.Mutex{},
+		StateNotifer:   newStateNotifer(10),
 	}
 
 	go hub.processRouterOper()
+
 	return hub
+}
+
+func (hub *MsgHub) AddOfflineRouter(srange, erange uint64, hubid int) error {
+	if srange > hub.maxRange || erange > hub.maxRange {
+		return OutOfMaxRange
+	}
+	hub._clientsMutex.Lock()
+	for i := srange; i < erange; i++ {
+		hub.offlineRouter[i] = byte(hubid)
+	}
+	hub._clientsMutex.Unlock()
+	return nil
 }
 
 func (hub *MsgHub) rebuildRemoteRouter(conn *Conn) error {
@@ -287,23 +324,25 @@ func (hub *MsgHub) LocalDispatch(msg RouteMsg) {
 	key1 := fmt.Sprintf("%d.1", msg.Destination())
 	key2 := fmt.Sprintf("%d.2", msg.Destination())
 	var conn Client
-	var ok bool
+	var ok1 = false
+	var ok2 = false
 	hub._clientsMutex.Lock()
-	conn, ok = hub.clients[key1]
+	conn, ok1 = hub.clients[key1]
 	hub._clientsMutex.Unlock()
-	if ok {
+	if ok1 {
 		conn.SendMsg(msg)
 	}
 
 	hub._clientsMutex.Lock()
-	conn, ok = hub.clients[key2]
+	conn, ok2 = hub.clients[key2]
 	hub._clientsMutex.Unlock()
 
-	if ok {
+	if ok2 {
 		conn.SendMsg(msg)
 	}
-
-	//TODO: maybe some msg dropped
+	if !ok1 && !ok2 {
+		atomic.AddUint64(&hub.dropCount, 1)
+	}
 }
 
 func (hub *MsgHub) RemoteDispatch(id int, msg RouteMsg) {
@@ -322,6 +361,28 @@ func (hub *MsgHub) RemoteDispatch(id int, msg RouteMsg) {
 	}
 }
 
+func (hub *MsgHub) localOfflineDispatch(msg *OfflineMsg) {
+
+}
+
+func (hub *MsgHub) remoteOfflineDispatch(id int, msg *OfflineMsg) {
+	hub.RemoteDispatch(id, msg)
+}
+
+func (hub *MsgHub) offlineDispatch(msg RouteMsg) {
+	r := int(hub.offlineRouter[msg.Destination()])
+	if r == 0 {
+		WARN.Println("TODO: offline router is not set.")
+		return
+	}
+	offline := &OfflineMsg{To: uint64(msg.Destination()), Carry: msg.Body()}
+	if r == hub.id {
+		hub.localOfflineDispatch(offline)
+	} else {
+		hub.remoteOfflineDispatch(r, offline)
+	}
+}
+
 func (hub *MsgHub) Dispatch(msg RouteMsg) {
 	if msg == nil {
 		return
@@ -329,8 +390,7 @@ func (hub *MsgHub) Dispatch(msg RouteMsg) {
 	dest := msg.Destination()
 	id := int(hub.router[dest] & RouterMask)
 	if id == 0 {
-		//TODO: destination is offline
-		WARN.Println("TODO: destination is offline")
+		hub.offlineDispatch(msg)
 		return
 	}
 	if hub.id == id {
@@ -344,9 +404,28 @@ func (hub *MsgHub) clearRouter(svrid int) {
 	hub.routerOperChan <- &routerOper{hubId: svrid, oper: oper_clearHub}
 }
 
+func readRouteMsgBody(reader *bufio.Reader) (to uint64, body []byte, err error) {
+	if err = binary.Read(reader, binary.LittleEndian, &to); err != nil {
+		return
+	}
+	var l uint16
+	if err = binary.Read(reader, binary.LittleEndian, &l); err != nil {
+		return
+	}
+	body = make([]byte, l)
+	var n = 0
+	c := 0
+	for c < int(l) {
+		if n, err = reader.Read(body[n:]); err != nil {
+			return
+		}
+		c += n
+	}
+	return
+}
+
 func (hub *MsgHub) incomingLoop(c net.Conn) {
 	var err error
-	var n int
 	reader := bufio.NewReader(c)
 
 	defer func() {
@@ -406,24 +485,16 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 			}
 		case RouteMsgType:
 			var msg DeliverMsg
-			if err = binary.Read(reader, binary.LittleEndian, &msg.To); err != nil {
+			if msg.To, msg.Carry, err = readRouteMsgBody(reader); err != nil {
 				return
 			}
-			var l uint32
-			if err = binary.Read(reader, binary.LittleEndian, &l); err != nil {
-				return
-			}
-			body := make([]byte, l)
-			n = 0
-			c := 0
-			for c < int(l) {
-				if n, err = reader.Read(body[n:]); err != nil {
-					return
-				}
-				c += n
-			}
-			msg.Carry = body
 			hub.LocalDispatch(&msg)
+		case OfflineMsgType:
+			var msg OfflineMsg
+			if msg.To, msg.Carry, err = readRouteMsgBody(reader); err != nil {
+				return
+			}
+			hub.localOfflineDispatch(&msg)
 		}
 	}
 
