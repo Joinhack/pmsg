@@ -16,6 +16,7 @@ const (
 	WhoamIControlType = iota
 	AddRouteControlType
 	RemoveRouteControlType
+	AddOfflineRouteControlType
 )
 
 var (
@@ -178,4 +179,39 @@ func (c *StringMsg) Bytes() []byte {
 
 func (c *StringMsg) Body() []byte {
 	return c.Bytes()
+}
+
+type OfflineRouteControlMsg struct {
+	ControlType          int
+	HubId                byte
+	RangeStart, RangeEnd uint64
+}
+
+func (msg *OfflineRouteControlMsg) Bytes() []byte {
+	bs := make([]byte, msg.Len())
+	bs[0] = ControlMsgType
+	bs[1] = byte(msg.ControlType)
+	bs[2] = msg.HubId
+	binary.LittleEndian.PutUint64(bs[3:], msg.RangeStart)
+	binary.LittleEndian.PutUint64(bs[11:], msg.RangeEnd)
+	return bs
+}
+
+func (msg *OfflineRouteControlMsg) Unmarshal(bs []byte) error {
+	if len(bs) != msg.Len() {
+		return UnknownFramedMsg
+	}
+	msg.ControlType = int(bs[1])
+	msg.HubId = bs[2]
+	msg.RangeStart = binary.LittleEndian.Uint64(bs[3:])
+	msg.RangeEnd = binary.LittleEndian.Uint64(bs[11:])
+	return nil
+}
+
+func (msg *OfflineRouteControlMsg) Body() []byte {
+	return msg.Bytes()
+}
+
+func (msg *OfflineRouteControlMsg) Len() int {
+	return 19
 }

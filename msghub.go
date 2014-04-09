@@ -70,11 +70,19 @@ type MsgHub struct {
 	listener       net.Listener
 	dropCount      uint64
 	_clientsMutex  *sync.Mutex
+	*OfflineCenter
 	*StateNotifer
 }
 
 func toKey(id uint64, typ byte) string {
 	return fmt.Sprintf("%d.%d", id, typ)
+}
+
+func (hub *MsgHub) notifyOfflineMsgReplay(id uint64) {
+	//offline msg is in local
+	if hub.OfflineCenter != nil && hub.offlineRouter[id] == byte(hub.id) {
+		hub.offlineMsgReplay(id)
+	}
 }
 
 func (hub *MsgHub) processRouterOper() {
@@ -133,6 +141,7 @@ func (hub *MsgHub) processRouterOper() {
 				hub.notifyLogon(oper.destination, oper.typ)
 			}
 			hub.router[oper.destination] = v
+			hub.notifyOfflineMsgReplay(oper.destination)
 		case oper_remove:
 			r := hub.router[oper.destination]
 			if r != 0 {
@@ -208,7 +217,35 @@ func (hub *MsgHub) RemoveRoute(d uint64, typ byte) {
 	hub.routerOperChan <- &routerOper{destination: d, typ: typ, oper: oper_remove}
 }
 
-func NewMsgHub(id int, maxRange uint64, servAddr string) *MsgHub {
+type MsgHubConfig struct {
+	Id                int
+	MaxRange          uint64
+	ServAddr          string
+	OfflineRangeStart uint64
+	OfflineRangeEnd   uint64
+	OfflinePath       string
+}
+
+func NewMsgHub(cfg *MsgHubConfig) *MsgHub {
+	hub := newMsgHub(cfg.Id, cfg.MaxRange, cfg.ServAddr)
+	if offlineCenter, err := newOfflineCenter(cfg.OfflineRangeStart, cfg.OfflineRangeEnd, hub, cfg.OfflinePath); err != nil {
+		panic(err)
+	} else {
+		hub.OfflineCenter = offlineCenter
+	}
+	if cfg.OfflineRangeEnd > cfg.MaxRange {
+		panic(OutOfMaxRange)
+	}
+	if (cfg.OfflineRangeStart >= cfg.OfflineRangeEnd) || cfg.OfflineRangeStart == 0 {
+		return hub
+	}
+	if err := hub.AddOfflineRouter(cfg.OfflineRangeStart, cfg.OfflineRangeEnd, hub.id); err != nil {
+		panic(err)
+	}
+	return hub
+}
+
+func newMsgHub(id int, maxRange uint64, servAddr string) *MsgHub {
 	hub := &MsgHub{
 		id:             id,
 		router:         make([]byte, maxRange),
@@ -220,7 +257,6 @@ func NewMsgHub(id int, maxRange uint64, servAddr string) *MsgHub {
 		_clientsMutex:  &sync.Mutex{},
 		StateNotifer:   newStateNotifer(10),
 	}
-
 	go hub.processRouterOper()
 
 	return hub
@@ -253,6 +289,21 @@ func (hub *MsgHub) rebuildRemoteRouter(conn *Conn) error {
 	return nil
 }
 
+func (hub *MsgHub) sendOfflineRouter(conn *Conn) error {
+	if hub.OfflineCenter == nil {
+		return nil
+	}
+	var routeControlMsg OfflineRouteControlMsg
+	routeControlMsg.ControlType = AddOfflineRouteControlType
+	routeControlMsg.HubId = byte(hub.id)
+	routeControlMsg.RangeStart = hub.rangeStart
+	routeControlMsg.RangeEnd = hub.rangeEnd
+	if _, err := conn.Write(routeControlMsg.Bytes()); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (hub *MsgHub) outgoingLoop(addr string, id uint64) {
 	var err error
 	var msg Msg
@@ -273,6 +324,9 @@ func (hub *MsgHub) outgoingLoop(addr string, id uint64) {
 			}
 			//rebuild remote router
 			if err = hub.rebuildRemoteRouter(conn); err != nil {
+				goto ERROR
+			}
+			if err = hub.sendOfflineRouter(conn); err != nil {
 				goto ERROR
 			}
 		}
@@ -362,7 +416,7 @@ func (hub *MsgHub) RemoteDispatch(id int, msg RouteMsg) {
 }
 
 func (hub *MsgHub) localOfflineDispatch(msg *OfflineMsg) {
-
+	hub.Archive(msg)
 }
 
 func (hub *MsgHub) remoteOfflineDispatch(id int, msg *OfflineMsg) {
@@ -482,6 +536,16 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 				} else {
 					hub.RemoveRoute(msg.Id, msg.Type)
 				}
+			case AddOfflineRouteControlType:
+				var msg OfflineRouteControlMsg
+				var buf = make([]byte, msg.Len())
+				buf[0] = ControlMsgType
+				buf[1] = controlType
+				reader.Read(buf[2:])
+				if err = msg.Unmarshal(buf); err != nil {
+					return
+				}
+				hub.AddOfflineRouter(msg.RangeStart, msg.RangeEnd, int(msg.HubId))
 			}
 		case RouteMsgType:
 			var msg DeliverMsg
@@ -496,6 +560,7 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 			}
 			hub.localOfflineDispatch(&msg)
 		}
+
 	}
 
 }

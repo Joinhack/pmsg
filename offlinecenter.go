@@ -8,12 +8,24 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
 const (
-	archiveTaskType = iota
-	notifyTaskType  //if user online send the notify control sub task send msg
+	archiveTaskType  = iota
+	dispatchTaskType //if user online send the notify control sub task send msg
+)
+
+const (
+	MAXIDPERDIR = 10000
+)
+
+var (
+	DefaultCacheLimit = 1024 * 1024 * 50
+	DefaultMaxItem    = 1024
+	DefaultArchedTime = 2
+	DefaultFlushTime  = 30
 )
 
 type offlineTask struct {
@@ -23,30 +35,188 @@ type offlineTask struct {
 }
 
 type offlineSubTask struct {
-	taskchan chan *offlineTask
-	hub      *MsgHub
-	cache    map[uint64]*list.List
-	baseDir  string
-	memBytes uint64
+	taskchan    chan *offlineTask
+	hub         *MsgHub
+	_flushMutex *sync.Mutex
+	cache       map[uint64]*list.List
+	baseDir     string
+	cacheBytes  uint64
+	cacheLimit  int
+	maxItem     int
+	id          int
 }
 
 type OfflineCenter struct {
-	wchan            chan RouteMsg
-	hub              *MsgHub
-	_wfile           *os.File //just handle
-	archiveFile      string
-	archiveDir       string
-	writer           *bufio.Writer
-	lastArchivedTime *time.Time
-	_dispatchChan    chan string
-	wBytes           uint64
-	subTask          []*offlineSubTask
+	wchan                chan RouteMsg
+	hub                  *MsgHub
+	_wfile               *os.File //just handle
+	archiveFile          string
+	archiveDir           string
+	writer               *bufio.Writer
+	lastArchivedTime     *time.Time
+	rangeStart, rangeEnd uint64
+	_dispatchChan        chan string
+	wBytes               uint64
+	subTask              []*offlineSubTask
 }
 
-func (st *offlineSubTask) sendMsg(id uint64) {
+func newOfflineSubTask(hub *MsgHub, mutex *sync.Mutex, path string, id int) *offlineSubTask {
+	subtask := &offlineSubTask{
+		taskchan:    make(chan *offlineTask, 1),
+		hub:         hub,
+		_flushMutex: mutex,
+		cache:       make(map[uint64]*list.List, 1000),
+		baseDir:     path,
+		cacheBytes:  0,
+		cacheLimit:  DefaultCacheLimit,
+		maxItem:     DefaultMaxItem,
+		id:          id,
+	}
+	go subtask.taskLoop()
+	return subtask
+}
+
+func _readMsg(reader *bufio.Reader) (body []byte, err error) {
+	var l uint16
+	if err = binary.Read(reader, binary.LittleEndian, &l); err != nil {
+		return
+	}
+	body = make([]byte, l)
+	var n = 0
+	c := 0
+	for c < int(l) {
+		if n, err = reader.Read(body[n:]); err != nil {
+			return
+		}
+		c += n
+	}
+	return
+}
+
+func (st *offlineSubTask) dispatchMsgFromFile(id uint64) {
+	hub := st.hub
+	var finfo os.FileInfo
+	var err error
+	var file *os.File
+	path := filepath.Join(st.baseDir, fmt.Sprintf("%d", st.id), fmt.Sprintf("%d", id))
+	if finfo, err = os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		panic(err)
+	} else if finfo.IsDir() {
+		panic(fmt.Sprintf("%s must be regard file\n", path))
+	}
+
+	if file, err = os.OpenFile(path, os.O_RDONLY, 0644); err != nil {
+		panic(err)
+	}
+	defer func() {
+		if file != nil {
+			file.Close()
+			file = nil
+		}
+	}()
+	reader := bufio.NewReader(file)
+	var body []byte
+	for {
+		if body, err = _readMsg(reader); err != nil {
+			if err == io.EOF {
+				break
+			}
+			ERROR.Println(err)
+			break
+		}
+		hub.Dispatch(&DeliverMsg{To: id, Carry: body})
+	}
+	file.Close()
+	file = nil
+	if err = os.Remove(path); err != nil {
+		ERROR.Println(err)
+	}
+}
+
+func (st *offlineSubTask) dispatchMsgFromCache(id uint64) {
+	l := st.cache[id]
+	if l == nil {
+		return
+	}
+	hub := st.hub
+	for e := l.Front(); e != nil; e = e.Next() {
+		msg := e.Value.(RouteMsg)
+		st.cacheBytes -= uint64(len(msg.Body()))
+		hub.Dispatch(&DeliverMsg{To: id, Carry: msg.Body()})
+	}
+	l.Init()
+}
+
+func (st *offlineSubTask) dispatchMsg(id uint64) {
+	hub := st.hub
+	if hub.router[id] == 0 {
+		return
+	}
+	st.dispatchMsgFromFile(id)
+	st.dispatchMsgFromCache(id)
 }
 
 func (st *offlineSubTask) writeMsg(msg RouteMsg) {
+	var l *list.List
+	var ok bool
+	id := msg.Destination()
+	if l, ok = st.cache[id]; !ok {
+		l = list.New()
+		st.cache[id] = l
+	}
+	l.PushBack(msg)
+	st.cacheBytes += uint64(len(msg.Body()))
+	if l.Len() > st.maxItem {
+		st._flushMutex.Lock()
+		defer st._flushMutex.Unlock()
+		st.flush(id, l)
+	}
+}
+
+func _writeMsg(writer *bufio.Writer, msg RouteMsg) {
+	var err error
+	body := msg.Body()
+	var l uint16 = uint16(len(body))
+	if err = binary.Write(writer, binary.LittleEndian, l); err != nil {
+		panic(err)
+	}
+	if err = binary.Write(writer, binary.LittleEndian, body); err != nil {
+		panic(err)
+	}
+}
+
+func (st *offlineSubTask) flushAll() {
+	st._flushMutex.Lock()
+	defer st._flushMutex.Unlock()
+	for id, l := range st.cache {
+		if l.Len() > 0 {
+			st.flush(id, l)
+		}
+	}
+	if st.cacheBytes != 0 {
+		panic(fmt.Sprintf("please check cacheBytes shold be zero, but it's %d", st.cacheBytes))
+	}
+}
+
+func (st *offlineSubTask) flush(id uint64, l *list.List) {
+	path := filepath.Join(st.baseDir, fmt.Sprintf("%d", st.id), fmt.Sprintf("%d", id))
+	var file *os.File
+	var err error
+	if file, err = open(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE); err != nil {
+		panic(err)
+	}
+	writer := bufio.NewWriter(file)
+	defer file.Close()
+	for e := l.Front(); e != nil; e = e.Next() {
+		msg := e.Value.(RouteMsg)
+		_writeMsg(writer, msg)
+		st.cacheBytes -= uint64(len(msg.Body()))
+	}
+	writer.Flush()
+	l.Init()
 }
 
 func (st *offlineSubTask) taskLoop() {
@@ -59,12 +229,17 @@ func (st *offlineSubTask) taskLoop() {
 				//channel is closed
 				return
 			}
+			if task.taskType == archiveTaskType {
+				st.writeMsg(task.msg)
+			}
+			if task.taskType == dispatchTaskType {
+				st.dispatchMsg(task.id)
+			}
+		case <-time.After(time.Duration(DefaultFlushTime) * time.Second):
+			st.flushAll()
 		}
-		if task.taskType == archiveTaskType {
-			st.writeMsg(task.msg)
-		}
-		if task.taskType == notifyTaskType {
-			st.sendMsg(task.id)
+		if st.cacheBytes > uint64(st.cacheLimit) {
+			st.flushAll()
 		}
 	}
 }
@@ -80,7 +255,7 @@ func (c *OfflineCenter) archiveLoop() {
 				return
 			}
 			c.writeMsg(msg)
-		case <-time.After(2 * time.Second):
+		case <-time.After(time.Duration(DefaultArchedTime) * time.Second):
 		}
 		c.processArchive()
 	}
@@ -105,9 +280,10 @@ func (c *OfflineCenter) processArchive() {
 				panic(err)
 			}
 			c._wfile.Close()
-			var target string = filepath.Join(c.archiveDir, "arch", c.archivedFileName())
+			var target string = filepath.Join(c.archiveDir, c.archivedFileName())
 			os.Link(c.archiveFile, target)
 			c.writer = nil
+			c._dispatchChan <- target
 		}
 	}
 }
@@ -123,9 +299,15 @@ func (c *OfflineCenter) writeMsg(msg RouteMsg) {
 	}
 	var l uint16 = uint16(len(val))
 	var to uint64 = msg.Destination()
-	binary.Write(c.writer, binary.LittleEndian, to)
-	binary.Write(c.writer, binary.LittleEndian, l)
-	binary.Write(c.writer, binary.LittleEndian, val)
+	if err = binary.Write(c.writer, binary.LittleEndian, to); err != nil {
+		panic(err)
+	}
+	if err = binary.Write(c.writer, binary.LittleEndian, l); err != nil {
+		panic(err)
+	}
+	if err = binary.Write(c.writer, binary.LittleEndian, val); err != nil {
+		panic(err)
+	}
 	c.wBytes += uint64(l)
 	if err != nil {
 		panic(err)
@@ -141,20 +323,21 @@ func (c *OfflineCenter) openWriter() {
 	c.writer = bufio.NewWriter(c._wfile)
 }
 
-func newOfflineCenter(num int, hub *MsgHub, path string) (c *OfflineCenter, err error) {
+func newOfflineCenter(srange, erange uint64, hub *MsgHub, path string) (c *OfflineCenter, err error) {
 	path, err = filepath.Abs(path)
 	if err != nil {
 		return
 	}
+	var stat os.FileInfo
 	path = filepath.ToSlash(path)
-	var file, dir string
-	dir, file = filepath.Split(path)
-	if file == "" {
-		err = MustbeFilePath
+	if stat, err = os.Stat(path); err != nil {
 		return
 	}
-	var stat os.FileInfo
-	archDir := filepath.Join(dir, "arch")
+	if !stat.IsDir() {
+		err = MustbeDir
+		return
+	}
+	archDir := filepath.Join(path, "arch")
 	stat, err = os.Stat(archDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -169,15 +352,32 @@ func newOfflineCenter(num int, hub *MsgHub, path string) (c *OfflineCenter, err 
 		err = MustbeDir
 		return
 	}
+	taskNum := int(erange-srange)/MAXIDPERDIR + 1
+	subtasks := make([]*offlineSubTask, taskNum)
+	for i := 0; i < taskNum; i++ {
+		err = os.Mkdir(filepath.Join(path, fmt.Sprintf("%d", i)), 0755)
+		if !os.IsExist(err) {
+			panic(err)
+		}
+	}
+	mutex := &sync.Mutex{}
+	for i := 0; i < taskNum; i++ {
+		subtasks[i] = newOfflineSubTask(hub, mutex, path, i)
+	}
 	center := &OfflineCenter{
 		wchan:         make(chan RouteMsg, 1024),
 		hub:           hub,
 		archiveDir:    archDir,
-		archiveFile:   path,
+		archiveFile:   filepath.Join(path, "binlog"),
 		_dispatchChan: make(chan string, 1),
+		subTask:       subtasks,
+		rangeStart:    srange,
+		rangeEnd:      erange,
 	}
 	err = nil
 	c = center
+	go center.archiveLoop()
+	go center.dispatchLoop()
 	return
 }
 
@@ -213,7 +413,8 @@ func (c *OfflineCenter) dispatch(path string) {
 			continue
 		}
 		// every sub task manage 10000 id
-		sidx := msg.To % 10000
+		sidx := (msg.To - c.rangeStart) / MAXIDPERDIR
+		//TODO: if sidx out of the subtasks
 		c.subTask[sidx].taskchan <- &offlineTask{msg: msg, id: msg.Destination(), taskType: archiveTaskType}
 	}
 	rfile.Close()
@@ -221,6 +422,10 @@ func (c *OfflineCenter) dispatch(path string) {
 	if err = os.Remove(path); err != nil {
 		ERROR.Println(err)
 	}
+}
+
+func (c *OfflineCenter) offlineMsgReplay(id uint64) {
+	c.subTask[(id-c.rangeStart)/uint64(MAXIDPERDIR)].taskchan <- &offlineTask{id: id, taskType: dispatchTaskType}
 }
 
 func (c *OfflineCenter) dispatchLoop() {
