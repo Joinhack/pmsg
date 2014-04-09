@@ -293,6 +293,8 @@ func (hub *MsgHub) sendOfflineRouter(conn *Conn) error {
 	if hub.OfflineCenter == nil {
 		return nil
 	}
+	hub._clientsMutex.Lock()
+	defer hub._clientsMutex.Unlock()
 	var routeControlMsg OfflineRouteControlMsg
 	routeControlMsg.ControlType = AddOfflineRouteControlType
 	routeControlMsg.HubId = byte(hub.id)
