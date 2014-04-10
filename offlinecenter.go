@@ -22,10 +22,11 @@ const (
 )
 
 var (
-	DefaultCacheLimit = 1024 * 1024 * 50
-	DefaultMaxItem    = 1024
-	DefaultArchedTime = 2
-	DefaultFlushTime  = 30
+	DefaultCacheLimit             = 1024 * 1024 * 50
+	DefaultMaxItem                = 1024
+	DefaultArchedTime      int64  = 2
+	DefaultFlushTime              = 30
+	DefaultArchedSizeLimit uint64 = 1024 * 1024 * 50
 )
 
 type offlineTask struct {
@@ -271,14 +272,14 @@ func (c *OfflineCenter) processArchive() {
 		c.lastArchivedTime = &now
 		return
 	}
-	if now.Unix()-c.lastArchivedTime.Unix() >= 1 || c.wBytes > limit {
+	if now.Unix()-c.lastArchivedTime.Unix() >= DefaultArchedTime || c.wBytes > DefaultArchedSizeLimit {
 		*c.lastArchivedTime = now
-		if c.wBytes > 0 {
+		if c.writer != nil {
 			err := c.writer.Flush()
-			c.wBytes = 0
 			if err != nil {
 				panic(err)
 			}
+			c.wBytes = 0
 			c._wfile.Close()
 			var target string = filepath.Join(c.archiveDir, c.archivedFileName())
 			os.Link(c.archiveFile, target)
@@ -296,6 +297,10 @@ func (c *OfflineCenter) writeMsg(msg RouteMsg) {
 	}
 	if c.writer == nil {
 		c.openWriter()
+	}
+	if msg.Destination() > uint64(10000) {
+		println(msg.Destination())
+		panic("sssss")
 	}
 	var l uint16 = uint16(len(val))
 	var to uint64 = msg.Destination()
@@ -366,7 +371,7 @@ func newOfflineCenter(srange, erange uint64, hub *MsgHub, path string) (c *Offli
 		subtasks[i] = newOfflineSubTask(hub, mutex, path, i)
 	}
 	center := &OfflineCenter{
-		wchan:         make(chan RouteMsg, 1024),
+		wchan:         make(chan RouteMsg, 1),
 		hub:           hub,
 		archiveDir:    archDir,
 		archiveFile:   filepath.Join(path, "binlog"),
@@ -409,6 +414,10 @@ func (c *OfflineCenter) dispatch(path string) {
 			return
 		}
 		//check online table.
+		if msg.To > uint64(10000) {
+			println(msg.To)
+			panic(path)
+		}
 		if hub.router[msg.To] != 0 {
 			hub.Dispatch(msg)
 			continue
