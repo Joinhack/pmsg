@@ -282,7 +282,7 @@ func (c *OfflineCenter) processArchive() {
 			c.wBytes = 0
 			c._wfile.Close()
 			var target string = filepath.Join(c.archiveDir, c.archivedFileName())
-			os.Link(c.archiveFile, target)
+			os.Rename(c.archiveFile, target)
 			c.writer = nil
 			c._dispatchChan <- target
 		}
@@ -401,7 +401,7 @@ func (c *OfflineCenter) dispatch(path string) {
 	}()
 	reader = bufio.NewReader(rfile)
 	for {
-		msg := &OfflineMsg{}
+		msg := &DeliverMsg{}
 		if msg.To, msg.Carry, err = readRouteMsgBody(reader); err != nil {
 			if err == io.EOF {
 				break
