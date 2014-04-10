@@ -22,11 +22,12 @@ const (
 )
 
 var (
-	DefaultCacheLimit             = 1024 * 1024 * 50
-	DefaultMaxItem                = 1024
-	DefaultArchedTime      int64  = 2
-	DefaultFlushTime              = 30
-	DefaultArchedSizeLimit uint64 = 1024 * 1024 * 50
+	DefaultArchDispatchQueueLen        = 10
+	DefaultCacheLimit                  = 1024 * 1024 * 50
+	DefaultMaxItem                     = 1024
+	DefaultArchedTime           int64  = 2
+	DefaultFlushTime                   = 30
+	DefaultArchedSizeLimit      uint64 = 1024 * 1024 * 50
 )
 
 type offlineTask struct {
@@ -338,7 +339,7 @@ func newOfflineCenter(srange, erange uint64, hub *MsgHub, path string) (c *Offli
 		err = MustbeDir
 		return
 	}
-	archDir := filepath.Join(path, "arch")
+	archDir := filepath.Join(path, "archived")
 	stat, err = os.Stat(archDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -367,11 +368,11 @@ func newOfflineCenter(srange, erange uint64, hub *MsgHub, path string) (c *Offli
 		subtasks[i] = newOfflineSubTask(hub, mutex, path, i)
 	}
 	center := &OfflineCenter{
-		wchan:         make(chan RouteMsg, 1),
+		wchan:         make(chan RouteMsg, 10),
 		hub:           hub,
 		archiveDir:    archDir,
 		archiveFile:   filepath.Join(path, "binlog"),
-		_dispatchChan: make(chan string, 1),
+		_dispatchChan: make(chan string, DefaultArchDispatchQueueLen),
 		subTask:       subtasks,
 		rangeStart:    srange,
 		rangeEnd:      erange,

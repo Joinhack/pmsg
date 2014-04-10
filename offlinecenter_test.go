@@ -15,7 +15,7 @@ func TestOfflineCenterLocalDispatch(t *testing.T) {
 		MaxRange:          1024 * 1024,
 		ServAddr:          ":0",
 		OfflineRangeStart: 1,
-		OfflineRangeEnd:   10240,
+		OfflineRangeEnd:   1000,
 		OfflinePath:       "/tmp",
 	}
 	hub := NewMsgHub(cfg)
