@@ -561,6 +561,7 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 				return
 			}
 			if msg.To > uint64(10000) {
+				println(msg.To)
 				panic(msg.To)
 			}
 			hub.localOfflineDispatch(&msg)
