@@ -298,7 +298,7 @@ func (c *OfflineCenter) writeMsg(msg RouteMsg) {
 	if c.writer == nil {
 		c.openWriter()
 	}
-	if msg.Destination() > uint64(10000) {
+	if msg.Destination() > uint64(60000) {
 		println(msg.Destination())
 		panic("sssss")
 	}
@@ -414,7 +414,7 @@ func (c *OfflineCenter) dispatch(path string) {
 			return
 		}
 		//check online table.
-		if msg.To > uint64(10000) {
+		if msg.To > uint64(60000) {
 			println(msg.To)
 			panic(path)
 		}
