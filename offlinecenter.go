@@ -355,9 +355,10 @@ func newOfflineCenter(srange, erange uint64, hub *MsgHub, path string) (c *Offli
 	taskNum := int(erange-srange)/MAXIDPERDIR + 1
 	subtasks := make([]*offlineSubTask, taskNum)
 	for i := 0; i < taskNum; i++ {
-		err = os.Mkdir(filepath.Join(path, fmt.Sprintf("%d", i)), 0755)
-		if !os.IsExist(err) {
-			panic(err)
+		if err = os.Mkdir(filepath.Join(path, fmt.Sprintf("%d", i)), 0755); err != nil {
+			if !os.IsExist(err) {
+				panic(err)
+			}
 		}
 	}
 	mutex := &sync.Mutex{}
