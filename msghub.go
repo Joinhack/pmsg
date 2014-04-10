@@ -560,10 +560,6 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 			if msg.To, msg.Carry, err = readRouteMsgBody(reader); err != nil {
 				return
 			}
-			if msg.To > uint64(60000) {
-				println(msg.To)
-				panic(msg.To)
-			}
 			hub.localOfflineDispatch(&msg)
 		}
 

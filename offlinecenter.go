@@ -298,10 +298,6 @@ func (c *OfflineCenter) writeMsg(msg RouteMsg) {
 	if c.writer == nil {
 		c.openWriter()
 	}
-	if msg.Destination() > uint64(60000) {
-		println(msg.Destination())
-		panic("sssss")
-	}
 	var l uint16 = uint16(len(val))
 	var to uint64 = msg.Destination()
 	if err = binary.Write(c.writer, binary.LittleEndian, to); err != nil {
@@ -405,7 +401,7 @@ func (c *OfflineCenter) dispatch(path string) {
 	}()
 	reader = bufio.NewReader(rfile)
 	for {
-		msg := &DeliverMsg{}
+		msg := &OfflineMsg{}
 		if msg.To, msg.Carry, err = readRouteMsgBody(reader); err != nil {
 			if err == io.EOF {
 				break
@@ -414,10 +410,6 @@ func (c *OfflineCenter) dispatch(path string) {
 			return
 		}
 		//check online table.
-		if msg.To > uint64(60000) {
-			println(msg.To)
-			panic(path)
-		}
 		if hub.router[msg.To] != 0 {
 			hub.Dispatch(msg)
 			continue

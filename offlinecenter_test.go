@@ -3,6 +3,7 @@ package pmsg
 import (
 	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -137,4 +138,45 @@ func TestOfflineCenterRemoteDispatch(t *testing.T) {
 	clientConn2.Close()
 	time.Sleep(20 * time.Millisecond)
 
+}
+
+func TestOfflineCenterArchive(t *testing.T) {
+	cfg := &MsgHubConfig{Id: 1,
+		MaxRange:          1024 * 1024,
+		ServAddr:          ":0",
+		OfflineRangeStart: 1,
+		OfflineRangeEnd:   20000,
+		OfflinePath:       "/tmp",
+	}
+
+	hub1 := NewMsgHub(cfg)
+
+	cfg = &MsgHubConfig{Id: 2,
+		MaxRange:          1024 * 1024,
+		ServAddr:          ":0",
+		OfflineRangeStart: 20001,
+		OfflineRangeEnd:   40000,
+		OfflinePath:       "/tmp",
+	}
+	hub2 := NewMsgHub(cfg)
+	go hub1.ListenAndServe()
+	go hub2.ListenAndServe()
+	time.Sleep(10 * time.Millisecond)
+	hub1Addr := fmt.Sprintf("127.0.0.1:%d", hub1.listener.Addr().(*net.TCPAddr).Port)
+	hub2Addr := fmt.Sprintf("127.0.0.1:%d", hub2.listener.Addr().(*net.TCPAddr).Port)
+	hub1.AddOutgoing(2, hub2Addr)
+	hub2.AddOutgoing(1, hub1Addr)
+	time.Sleep(10 * time.Millisecond)
+	wg := &sync.WaitGroup{}
+	for m := 0; m < 2; m++ {
+		wg.Add(1)
+		go func() {
+			for i := 20001; i < 40000; i++ {
+				hub1.Dispatch(&DeliverMsg{To: uint64(i), Carry: []byte("11212121212")})
+			}
+			wg.Done()
+		}()
+	}
+	wg.Wait()
+	time.Sleep(1 * time.Second)
 }
