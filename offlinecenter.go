@@ -24,10 +24,10 @@ const (
 var (
 	DefaultArchDispatchQueueLen        = 10
 	DefaultCacheLimit                  = 1024 * 1024 * 50
-	DefaultMaxItem                     = 1024
-	DefaultArchedTime           int64  = 2
+	DefaultMaxItem                     = 1024 * 4
+	DefaultArchivedTime         int64  = 30
 	DefaultFlushTime                   = 30
-	DefaultArchedSizeLimit      uint64 = 1024 * 1024 * 50
+	DefaultArchivedSizeLimit    uint64 = 1024 * 1024 * 500
 )
 
 type offlineTask struct {
@@ -57,7 +57,6 @@ type OfflineCenter struct {
 	writer               *bufio.Writer
 	lastArchivedTime     *time.Time
 	rangeStart, rangeEnd uint64
-	_dispatchChan        chan string
 	wBytes               uint64
 	subTask              []*offlineSubTask
 }
@@ -256,24 +255,39 @@ func (c *OfflineCenter) archiveLoop() {
 				//channel closed
 				return
 			}
-			c.writeMsg(msg)
-		case <-time.After(time.Duration(DefaultArchedTime) * time.Second):
+			c.writeMsg2binlog(msg)
+			c.dispatchTask(msg)
+		case <-time.After(time.Duration(DefaultArchivedTime) * time.Second):
 		}
-		c.processArchive()
+		c.archived()
 	}
+}
+
+func (c *OfflineCenter) dispatchTask(msg RouteMsg) {
+	hub := c.hub
+	to := msg.Destination()
+	//check online table.
+	if hub.router[to] != 0 {
+		hub.Dispatch(msg)
+		return
+	}
+	// every sub task manage 10000 id
+	sidx := (to - c.rangeStart) / MAXIDPERDIR
+	//TODO: if sidx out of the subtasks
+	c.subTask[sidx].taskchan <- &offlineTask{msg: msg, id: msg.Destination(), taskType: archiveTaskType}
 }
 
 func (c *OfflineCenter) archivedFileName() string {
 	return fmt.Sprintf("%d", time.Now().Unix())
 }
 
-func (c *OfflineCenter) processArchive() {
+func (c *OfflineCenter) archived() {
 	now := time.Now()
 	if c.lastArchivedTime == nil {
 		c.lastArchivedTime = &now
 		return
 	}
-	if now.Unix()-c.lastArchivedTime.Unix() >= DefaultArchedTime || c.wBytes > DefaultArchedSizeLimit {
+	if now.Unix()-c.lastArchivedTime.Unix() >= DefaultArchivedTime || c.wBytes > DefaultArchivedSizeLimit {
 		*c.lastArchivedTime = now
 		if c.writer != nil {
 			err := c.writer.Flush()
@@ -282,15 +296,15 @@ func (c *OfflineCenter) processArchive() {
 			}
 			c.wBytes = 0
 			c._wfile.Close()
-			var target string = filepath.Join(c.archiveDir, c.archivedFileName())
-			os.Rename(c.archiveFile, target)
+			targetPath := filepath.Join(c.archiveDir, c.archivedFileName())
+			os.Rename(c.archiveFile, targetPath)
 			c.writer = nil
-			c._dispatchChan <- target
+			//c._dispatchChan <- target
 		}
 	}
 }
 
-func (c *OfflineCenter) writeMsg(msg RouteMsg) {
+func (c *OfflineCenter) writeMsg2binlog(msg RouteMsg) {
 	var err error
 	val := msg.Body()
 	if len(val) == 0 {
@@ -368,82 +382,22 @@ func newOfflineCenter(srange, erange uint64, hub *MsgHub, path string) (c *Offli
 		subtasks[i] = newOfflineSubTask(hub, mutex, path, i)
 	}
 	center := &OfflineCenter{
-		wchan:         make(chan RouteMsg, 10),
-		hub:           hub,
-		archiveDir:    archDir,
-		archiveFile:   filepath.Join(path, "binlog"),
-		_dispatchChan: make(chan string, DefaultArchDispatchQueueLen),
-		subTask:       subtasks,
-		rangeStart:    srange,
-		rangeEnd:      erange,
+		wchan:       make(chan RouteMsg, 10),
+		hub:         hub,
+		archiveDir:  archDir,
+		archiveFile: filepath.Join(path, "binlog"),
+		subTask:     subtasks,
+		rangeStart:  srange,
+		rangeEnd:    erange,
 	}
 	err = nil
 	c = center
 	go center.archiveLoop()
-	go center.dispatchLoop()
 	return
-}
-
-func (c *OfflineCenter) dispatch(path string) {
-	var reader *bufio.Reader
-	var rfile *os.File
-	var err error
-
-	hub := c.hub
-	if rfile, err = os.OpenFile(path, os.O_RDONLY, 0644); err != nil {
-		ERROR.Println(err)
-		return
-	}
-	defer func() {
-		if rfile != nil {
-			rfile.Close()
-			rfile = nil
-		}
-	}()
-	reader = bufio.NewReader(rfile)
-	for {
-		msg := &DeliverMsg{}
-		if msg.To, msg.Carry, err = readRouteMsgBody(reader); err != nil {
-			if err == io.EOF {
-				break
-			}
-			ERROR.Println(err)
-			return
-		}
-		//check online table.
-		if hub.router[msg.To] != 0 {
-			hub.Dispatch(msg)
-			continue
-		}
-		// every sub task manage 10000 id
-		sidx := (msg.To - c.rangeStart) / MAXIDPERDIR
-		//TODO: if sidx out of the subtasks
-		c.subTask[sidx].taskchan <- &offlineTask{msg: msg, id: msg.Destination(), taskType: archiveTaskType}
-	}
-	rfile.Close()
-	rfile = nil
-	if err = os.Remove(path); err != nil {
-		ERROR.Println(err)
-	}
 }
 
 func (c *OfflineCenter) offlineMsgReplay(id uint64) {
 	c.subTask[(id-c.rangeStart)/uint64(MAXIDPERDIR)].taskchan <- &offlineTask{id: id, taskType: dispatchTaskType}
-}
-
-func (c *OfflineCenter) dispatchLoop() {
-	var path string
-	var ok bool
-	for {
-		select {
-		case path, ok = <-c._dispatchChan:
-			if !ok {
-				// channel is closed
-				return
-			}
-		}
-		c.dispatch(path)
-	}
 }
 
 func (c *OfflineCenter) Archive(msg RouteMsg) {

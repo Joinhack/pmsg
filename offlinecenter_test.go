@@ -9,7 +9,7 @@ import (
 )
 
 func TestOfflineCenterLocalDispatch(t *testing.T) {
-	DefaultArchedTime = 1
+	DefaultArchivedTime = 1
 	DefaultFlushTime = 1
 	cfg := &MsgHubConfig{Id: 1,
 		MaxRange:          1024 * 1024,
@@ -65,7 +65,7 @@ func TestOfflineCenterLocalDispatch(t *testing.T) {
 }
 
 func TestOfflineCenterRemoteDispatch(t *testing.T) {
-	DefaultArchedTime = 1
+	DefaultArchivedTime = 1
 	DefaultFlushTime = 1
 	cfg := &MsgHubConfig{
 		Id:                1,
