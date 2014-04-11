@@ -25,8 +25,9 @@ var (
 	DefaultArchDispatchQueueLen        = 10
 	DefaultCacheLimit                  = 1024 * 1024 * 50
 	DefaultMaxItem                     = 1024 * 4
-	DefaultArchivedTime         int64  = 30
+	DefaultArchivedTime         int64  = 60
 	DefaultFlushTime                   = 30
+	DefaultArchiveFiles                = (3600 * 3) / int(DefaultArchivedTime)
 	DefaultArchivedSizeLimit    uint64 = 1024 * 1024 * 500
 )
 
@@ -58,6 +59,7 @@ type OfflineCenter struct {
 	lastArchivedTime     *time.Time
 	rangeStart, rangeEnd uint64
 	wBytes               uint64
+	archivedFiles        *list.List
 	subTask              []*offlineSubTask
 }
 
@@ -190,6 +192,7 @@ func _writeMsg(writer *bufio.Writer, msg RouteMsg) {
 }
 
 func (st *offlineSubTask) flushAll() {
+	TRACE.Println("flush caches to disk")
 	st._flushMutex.Lock()
 	defer st._flushMutex.Unlock()
 	for id, l := range st.cache {
@@ -299,7 +302,13 @@ func (c *OfflineCenter) archived() {
 			targetPath := filepath.Join(c.archiveDir, c.archivedFileName())
 			os.Rename(c.archiveFile, targetPath)
 			c.writer = nil
-			//c._dispatchChan <- target
+
+			c.archivedFiles.PushBack(targetPath)
+			if c.archivedFiles.Len() > DefaultArchiveFiles {
+				elem := c.archivedFiles.Front()
+				os.Remove(elem.Value.(string))
+				c.archivedFiles.Remove(elem)
+			}
 		}
 	}
 }
@@ -382,13 +391,14 @@ func newOfflineCenter(srange, erange uint64, hub *MsgHub, path string) (c *Offli
 		subtasks[i] = newOfflineSubTask(hub, mutex, path, i)
 	}
 	center := &OfflineCenter{
-		wchan:       make(chan RouteMsg, 10),
-		hub:         hub,
-		archiveDir:  archDir,
-		archiveFile: filepath.Join(path, "binlog"),
-		subTask:     subtasks,
-		rangeStart:  srange,
-		rangeEnd:    erange,
+		wchan:         make(chan RouteMsg, 10),
+		hub:           hub,
+		archiveDir:    archDir,
+		archiveFile:   filepath.Join(path, "binlog"),
+		subTask:       subtasks,
+		rangeStart:    srange,
+		rangeEnd:      erange,
+		archivedFiles: list.New(),
 	}
 	err = nil
 	c = center
