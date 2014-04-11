@@ -45,7 +45,7 @@ type DeliverMsg struct {
 }
 
 func (msg *DeliverMsg) SetType(t int) {
-	msg.MsgType = t
+	msg.MsgType = byte(t)
 }
 
 func (msg *DeliverMsg) Type() int {
