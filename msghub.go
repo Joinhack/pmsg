@@ -417,11 +417,11 @@ func (hub *MsgHub) RemoteDispatch(id int, msg RouteMsg) {
 	}
 }
 
-func (hub *MsgHub) localOfflineDispatch(msg *OfflineMsg) {
+func (hub *MsgHub) localOfflineDispatch(msg RouteMsg) {
 	hub.Archive(msg)
 }
 
-func (hub *MsgHub) remoteOfflineDispatch(id int, msg *OfflineMsg) {
+func (hub *MsgHub) remoteOfflineDispatch(id int, msg RouteMsg) {
 	hub.RemoteDispatch(id, msg)
 }
 
@@ -431,7 +431,7 @@ func (hub *MsgHub) offlineDispatch(msg RouteMsg) {
 		WARN.Println("TODO: offline router is not set.")
 		return
 	}
-	offline := &OfflineMsg{To: uint64(msg.Destination()), Carry: msg.Body()}
+	offline := &DeliverMsg{To: uint64(msg.Destination()), Carry: msg.Body(), MsgType: OfflineMsgType}
 	if r == hub.id {
 		hub.localOfflineDispatch(offline)
 	} else {
@@ -445,7 +445,7 @@ func (hub *MsgHub) Dispatch(msg RouteMsg) {
 	}
 	dest := msg.Destination()
 	id := int(hub.router[dest] & RouterMask)
-	if id == 0 {
+	if id == 0 && msg.Type() != TempRouteMsgType {
 		hub.offlineDispatch(msg)
 		return
 	}
@@ -549,22 +549,22 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 				}
 				hub.AddOfflineRouter(msg.RangeStart, msg.RangeEnd, int(msg.HubId))
 			}
-		case RouteMsgType:
+		case RouteMsgType, TempRouteMsgType:
 			var msg DeliverMsg
 			if msg.To, msg.Carry, err = readRouteMsgBody(reader); err != nil {
 				return
 			}
+			msg.MsgType = msgType
 			hub.LocalDispatch(&msg)
 		case OfflineMsgType:
-			var msg OfflineMsg
+			var msg DeliverMsg
 			if msg.To, msg.Carry, err = readRouteMsgBody(reader); err != nil {
 				return
 			}
+			msg.MsgType = msgType
 			hub.localOfflineDispatch(&msg)
 		}
-
 	}
-
 }
 
 func (hub *MsgHub) ListenAndServe() error {

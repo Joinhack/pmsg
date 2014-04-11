@@ -130,7 +130,7 @@ func (st *offlineSubTask) dispatchMsgFromFile(id uint64) {
 			ERROR.Println(err)
 			break
 		}
-		hub.Dispatch(&DeliverMsg{To: id, Carry: body})
+		hub.Dispatch(&DeliverMsg{To: id, Carry: body, MsgType: RouteMsgType})
 	}
 	file.Close()
 	file = nil
@@ -148,7 +148,7 @@ func (st *offlineSubTask) dispatchMsgFromCache(id uint64) {
 	for e := l.Front(); e != nil; e = e.Next() {
 		msg := e.Value.(RouteMsg)
 		st.cacheBytes -= uint64(len(msg.Body()))
-		hub.Dispatch(&DeliverMsg{To: id, Carry: msg.Body()})
+		hub.Dispatch(&DeliverMsg{To: id, Carry: msg.Body(), MsgType: RouteMsgType})
 	}
 	l.Init()
 }
@@ -411,5 +411,8 @@ func (c *OfflineCenter) offlineMsgReplay(id uint64) {
 }
 
 func (c *OfflineCenter) Archive(msg RouteMsg) {
+	if msg.Type() != OfflineMsgType {
+		panic("error")
+	}
 	c.wchan <- msg
 }

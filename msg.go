@@ -8,8 +8,10 @@ import (
 const (
 	StringMsgType  = iota //like ping, framed msg end with \n
 	ControlMsgType        //framed msg
+
 	RouteMsgType
-	OfflineMsgType //another route msg
+	TempRouteMsgType //do save
+	OfflineMsgType   //another route msg
 )
 
 const (
@@ -30,6 +32,7 @@ type Msg interface {
 
 type RouteMsg interface {
 	Msg
+	Type() int
 	Destination() uint64
 }
 
@@ -38,6 +41,10 @@ type DeliverMsg struct {
 	MsgType byte
 	To      uint64
 	Carry   []byte
+}
+
+func (msg *DeliverMsg) Type() int {
+	return int(msg.MsgType)
 }
 
 func (msg *DeliverMsg) Destination() uint64 {
@@ -51,31 +58,7 @@ func (msg *DeliverMsg) Body() []byte {
 func (msg *DeliverMsg) Bytes() []byte {
 	bs := make([]byte, 11+len(msg.Carry))
 	copy(bs[11:], msg.Carry)
-	bs[0] = RouteMsgType
-	binary.LittleEndian.PutUint64(bs[1:], msg.Destination())
-	binary.LittleEndian.PutUint16(bs[9:], uint16(len(msg.Carry)))
-	return bs
-}
-
-type OfflineMsg struct {
-	RouteMsg
-	MsgType byte
-	To      uint64
-	Carry   []byte
-}
-
-func (msg *OfflineMsg) Destination() uint64 {
-	return msg.To
-}
-
-func (msg *OfflineMsg) Body() []byte {
-	return msg.Carry
-}
-
-func (msg *OfflineMsg) Bytes() []byte {
-	bs := make([]byte, 11+len(msg.Carry))
-	copy(bs[11:], msg.Carry)
-	bs[0] = OfflineMsgType
+	bs[0] = msg.MsgType
 	binary.LittleEndian.PutUint64(bs[1:], msg.Destination())
 	binary.LittleEndian.PutUint16(bs[9:], uint16(len(msg.Carry)))
 	return bs
