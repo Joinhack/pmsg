@@ -433,9 +433,9 @@ func (hub *MsgHub) offlineDispatch(msg RouteMsg) {
 	}
 	msg.SetType(OfflineMsgType)
 	if r == hub.id {
-		hub.localOfflineDispatch(offline)
+		hub.localOfflineDispatch(msg)
 	} else {
-		hub.remoteOfflineDispatch(r, offline)
+		hub.remoteOfflineDispatch(r, msg)
 	}
 }
 
