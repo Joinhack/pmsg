@@ -412,7 +412,7 @@ func (c *OfflineCenter) offlineMsgReplay(id uint64) {
 
 func (c *OfflineCenter) Archive(msg RouteMsg) {
 	if msg.Type() != OfflineMsgType {
-		panic("error")
+		panic("error msg type")
 	}
 	c.wchan <- msg
 }

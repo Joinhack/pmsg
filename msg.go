@@ -33,6 +33,7 @@ type Msg interface {
 type RouteMsg interface {
 	Msg
 	Type() int
+	SetType(t int)
 	Destination() uint64
 }
 
@@ -41,6 +42,10 @@ type DeliverMsg struct {
 	MsgType byte
 	To      uint64
 	Carry   []byte
+}
+
+func (msg *DeliverMsg) SetType(t int) {
+	msg.MsgType = t
 }
 
 func (msg *DeliverMsg) Type() int {

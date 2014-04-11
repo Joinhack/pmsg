@@ -431,7 +431,7 @@ func (hub *MsgHub) offlineDispatch(msg RouteMsg) {
 		WARN.Println("TODO: offline router is not set.")
 		return
 	}
-	offline := &DeliverMsg{To: uint64(msg.Destination()), Carry: msg.Body(), MsgType: OfflineMsgType}
+	msg.SetType(OfflineMsgType)
 	if r == hub.id {
 		hub.localOfflineDispatch(offline)
 	} else {
