@@ -39,9 +39,10 @@ type RouteMsg interface {
 
 type DeliverMsg struct {
 	RouteMsg
-	MsgType byte
-	To      uint64
-	Carry   []byte
+	IsReplay bool
+	MsgType  byte
+	To       uint64
+	Carry    []byte
 }
 
 func (msg *DeliverMsg) SetType(t int) {

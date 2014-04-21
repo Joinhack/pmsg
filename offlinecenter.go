@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	archiveTaskType  = iota
-	dispatchTaskType //if user online send the notify control sub task send msg
+	archiveTaskType = iota
+	replayTaskType  //if user online send the notify control sub task send msg
 )
 
 const (
@@ -30,6 +30,8 @@ var (
 	DefaultArchiveFiles                = (3600 * 3) / int(DefaultArchivedTime)
 	DefaultArchivedSizeLimit    uint64 = 1024 * 1024 * 500
 )
+
+type OfflineMsgFilter func(msg RouteMsg) bool
 
 type offlineTask struct {
 	taskType int
@@ -59,6 +61,7 @@ type OfflineCenter struct {
 	lastArchivedTime     *time.Time
 	rangeStart, rangeEnd uint64
 	wBytes               uint64
+	offlineMsgFilters    []OfflineMsgFilter
 	archivedFiles        *list.List
 	subTask              []*offlineSubTask
 }
@@ -96,7 +99,7 @@ func _readMsg(reader *bufio.Reader) (body []byte, err error) {
 	return
 }
 
-func (st *offlineSubTask) dispatchMsgFromFile(id uint64) {
+func (st *offlineSubTask) replayMsgFromFile(id uint64) {
 	hub := st.hub
 	var finfo os.FileInfo
 	var err error
@@ -130,7 +133,12 @@ func (st *offlineSubTask) dispatchMsgFromFile(id uint64) {
 			ERROR.Println(err)
 			break
 		}
-		hub.Dispatch(&DeliverMsg{To: id, Carry: body, MsgType: RouteMsgType})
+		hub.Dispatch(&DeliverMsg{
+			To:       id,
+			Carry:    body,
+			MsgType:  RouteMsgType,
+			IsReplay: true,
+		})
 	}
 	file.Close()
 	file = nil
@@ -139,7 +147,7 @@ func (st *offlineSubTask) dispatchMsgFromFile(id uint64) {
 	}
 }
 
-func (st *offlineSubTask) dispatchMsgFromCache(id uint64) {
+func (st *offlineSubTask) replayMsgFromCache(id uint64) {
 	l := st.cache[id]
 	if l == nil {
 		return
@@ -148,18 +156,23 @@ func (st *offlineSubTask) dispatchMsgFromCache(id uint64) {
 	for e := l.Front(); e != nil; e = e.Next() {
 		msg := e.Value.(RouteMsg)
 		st.cacheBytes -= uint64(len(msg.Body()))
-		hub.Dispatch(&DeliverMsg{To: id, Carry: msg.Body(), MsgType: RouteMsgType})
+		hub.Dispatch(&DeliverMsg{
+			To:       id,
+			Carry:    msg.Body(),
+			MsgType:  RouteMsgType,
+			IsReplay: true,
+		})
 	}
 	l.Init()
 }
 
-func (st *offlineSubTask) dispatchMsg(id uint64) {
+func (st *offlineSubTask) replayMsg(id uint64) {
 	hub := st.hub
 	if hub.router[id] == 0 {
 		return
 	}
-	st.dispatchMsgFromFile(id)
-	st.dispatchMsgFromCache(id)
+	st.replayMsgFromFile(id)
+	st.replayMsgFromCache(id)
 }
 
 func (st *offlineSubTask) writeMsg(msg RouteMsg) {
@@ -236,8 +249,8 @@ func (st *offlineSubTask) taskLoop() {
 			if task.taskType == archiveTaskType {
 				st.writeMsg(task.msg)
 			}
-			if task.taskType == dispatchTaskType {
-				st.dispatchMsg(task.id)
+			if task.taskType == replayTaskType {
+				st.replayMsg(task.id)
 			}
 		case <-time.After(time.Duration(DefaultFlushTime) * time.Second):
 			st.flushAll()
@@ -264,6 +277,10 @@ func (c *OfflineCenter) archiveLoop() {
 		}
 		c.archived()
 	}
+}
+
+func (c *OfflineCenter) AddOfflineMsgFilter(filter OfflineMsgFilter) {
+	c.offlineMsgFilters = append(c.offlineMsgFilters, filter)
 }
 
 func (c *OfflineCenter) dispatchTask(msg RouteMsg) {
@@ -407,12 +424,17 @@ func newOfflineCenter(srange, erange uint64, hub *MsgHub, path string) (c *Offli
 }
 
 func (c *OfflineCenter) offlineMsgReplay(id uint64) {
-	c.subTask[(id-c.rangeStart)/uint64(MAXIDPERDIR)].taskchan <- &offlineTask{id: id, taskType: dispatchTaskType}
+	c.subTask[(id-c.rangeStart)/uint64(MAXIDPERDIR)].taskchan <- &offlineTask{id: id, taskType: replayTaskType}
 }
 
 func (c *OfflineCenter) Archive(msg RouteMsg) {
 	if msg.Type() != OfflineMsgType {
 		panic("error msg type")
+	}
+	for _, filter := range c.offlineMsgFilters {
+		if !filter(msg) {
+			return
+		}
 	}
 	c.wchan <- msg
 }
