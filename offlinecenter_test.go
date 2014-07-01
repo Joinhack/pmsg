@@ -11,14 +11,14 @@ import (
 func TestOfflineCenterLocalDispatch(t *testing.T) {
 	DefaultArchivedTime = 1
 	DefaultFlushTime = 1
-	cfg := &MsgHubConfig{Id: 1,
+	cfg := &MsgHubFileStoreOfflineCenterConfig{Id: 1,
 		MaxRange:          1024 * 1024,
 		ServAddr:          ":0",
 		OfflineRangeStart: 1,
 		OfflineRangeEnd:   1000,
 		OfflinePath:       "/tmp",
 	}
-	hub := NewMsgHub(cfg)
+	hub := NewMsgHubWithFileStoreOfflineCenter(cfg)
 	ln, _ := net.Listen("tcp", ":0")
 	go func() {
 		for {
@@ -67,7 +67,7 @@ func TestOfflineCenterLocalDispatch(t *testing.T) {
 func TestOfflineCenterRemoteDispatch(t *testing.T) {
 	DefaultArchivedTime = 1
 	DefaultFlushTime = 1
-	cfg := &MsgHubConfig{
+	cfg := &MsgHubFileStoreOfflineCenterConfig{
 		Id:                1,
 		MaxRange:          1024 * 1024,
 		ServAddr:          ":0",
@@ -75,9 +75,9 @@ func TestOfflineCenterRemoteDispatch(t *testing.T) {
 		OfflineRangeEnd:   100,
 		OfflinePath:       "/tmp",
 	}
-	hub1 := NewMsgHub(cfg)
+	hub1 := NewMsgHubWithFileStoreOfflineCenter(cfg)
 
-	cfg = &MsgHubConfig{
+	cfg = &MsgHubFileStoreOfflineCenterConfig{
 		Id:                2,
 		MaxRange:          1024 * 1024,
 		ServAddr:          ":0",
@@ -85,7 +85,7 @@ func TestOfflineCenterRemoteDispatch(t *testing.T) {
 		OfflineRangeEnd:   200,
 		OfflinePath:       "/tmp",
 	}
-	hub2 := NewMsgHub(cfg)
+	hub2 := NewMsgHubWithFileStoreOfflineCenter(cfg)
 	ln, _ := net.Listen("tcp", ":0")
 	go func() {
 		for {
@@ -141,7 +141,7 @@ func TestOfflineCenterRemoteDispatch(t *testing.T) {
 }
 
 func TestOfflineCenterArchive(t *testing.T) {
-	cfg := &MsgHubConfig{Id: 1,
+	cfg := &MsgHubFileStoreOfflineCenterConfig{Id: 1,
 		MaxRange:          1024 * 1024,
 		ServAddr:          ":0",
 		OfflineRangeStart: 1,
@@ -149,16 +149,16 @@ func TestOfflineCenterArchive(t *testing.T) {
 		OfflinePath:       "/tmp",
 	}
 
-	hub1 := NewMsgHub(cfg)
+	hub1 := NewMsgHubWithFileStoreOfflineCenter(cfg)
 
-	cfg = &MsgHubConfig{Id: 2,
+	cfg = &MsgHubFileStoreOfflineCenterConfig{Id: 2,
 		MaxRange:          1024 * 1024,
 		ServAddr:          ":0",
 		OfflineRangeStart: 20001,
 		OfflineRangeEnd:   40000,
 		OfflinePath:       "/tmp",
 	}
-	hub2 := NewMsgHub(cfg)
+	hub2 := NewMsgHubWithFileStoreOfflineCenter(cfg)
 	go hub1.ListenAndServe()
 	go hub2.ListenAndServe()
 	time.Sleep(10 * time.Millisecond)

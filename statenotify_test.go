@@ -9,8 +9,8 @@ import (
 )
 
 func TestStateNotifer(t *testing.T) {
-	hub1 := newMsgHub(1, 1024*1024, ":0")
-	hub2 := newMsgHub(2, 1024*1024, ":0")
+	hub1 := NewMsgHub(1, 1024*1024, ":0")
+	hub2 := NewMsgHub(2, 1024*1024, ":0")
 	ln, _ := net.Listen("tcp", ":0")
 	go func() {
 		for {

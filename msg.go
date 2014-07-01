@@ -10,7 +10,7 @@ const (
 	ControlMsgType        //framed msg
 
 	RouteMsgType
-	TempRouteMsgType //do save
+	TempRouteMsgType //do not save
 	OfflineMsgType   //another route msg
 )
 
@@ -18,7 +18,7 @@ const (
 	WhoamIControlType = iota
 	AddRouteControlType
 	RemoveRouteControlType
-	AddOfflineRouteControlType
+	OfflineControlType
 )
 
 var (

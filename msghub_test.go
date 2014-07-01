@@ -8,7 +8,7 @@ import (
 )
 
 func TestBitOper(t *testing.T) {
-	hub := newMsgHub(1, 1024*1024, ":9999")
+	hub := NewMsgHub(1, 1024*1024, ":9999")
 	hub.AddRoute(1, 1, 2, nil)
 	time.Sleep(1 * time.Millisecond)
 	if hub.router[1]&RouterMask != 2 {
@@ -41,7 +41,7 @@ func TestBitOper(t *testing.T) {
 }
 
 func TestLocalDispatch(t *testing.T) {
-	hub := newMsgHub(1, 1024*1024, ":0")
+	hub := NewMsgHub(1, 1024*1024, ":0")
 	ln, _ := net.Listen("tcp", ":0")
 	go func() {
 		for {
@@ -95,7 +95,7 @@ func TestLocalDispatch(t *testing.T) {
 }
 
 func Test2DevDispatch(t *testing.T) {
-	hub := newMsgHub(1, 1024*1024, ":0")
+	hub := NewMsgHub(1, 1024*1024, ":0")
 	ln, _ := net.Listen("tcp", ":0")
 	go func() {
 		for {
@@ -153,8 +153,8 @@ func Test2DevDispatch(t *testing.T) {
 }
 
 func TestKickoff1(t *testing.T) {
-	hub1 := newMsgHub(1, 1024*1024, ":0")
-	hub2 := newMsgHub(2, 1024*1024, ":0")
+	hub1 := NewMsgHub(1, 1024*1024, ":0")
+	hub2 := NewMsgHub(2, 1024*1024, ":0")
 	ln, _ := net.Listen("tcp", ":0")
 	go func() {
 		for {
@@ -205,8 +205,8 @@ func TestKickoff1(t *testing.T) {
 }
 
 func TestKickoff2(t *testing.T) {
-	hub1 := newMsgHub(1, 1024*1024, ":0")
-	hub2 := newMsgHub(2, 1024*1024, ":0")
+	hub1 := NewMsgHub(1, 1024*1024, ":0")
+	hub2 := NewMsgHub(2, 1024*1024, ":0")
 	ln, _ := net.Listen("tcp", ":0")
 	go func() {
 		for {
@@ -258,8 +258,8 @@ func TestKickoff2(t *testing.T) {
 }
 
 func TestRedirect(t *testing.T) {
-	hub1 := newMsgHub(1, 1024*1024, ":0")
-	hub2 := newMsgHub(2, 1024*1024, ":0")
+	hub1 := NewMsgHub(1, 1024*1024, ":0")
+	hub2 := NewMsgHub(2, 1024*1024, ":0")
 	ln, _ := net.Listen("tcp", ":0")
 	go func() {
 		for {
@@ -312,8 +312,8 @@ func TestRedirect(t *testing.T) {
 }
 
 func TestRemoteDispatch(t *testing.T) {
-	hub1 := newMsgHub(1, 1024*1024, ":0")
-	hub2 := newMsgHub(2, 1024*1024, ":0")
+	hub1 := NewMsgHub(1, 1024*1024, ":0")
+	hub2 := NewMsgHub(2, 1024*1024, ":0")
 	ln, _ := net.Listen("tcp", ":0")
 	go func() {
 		for {
