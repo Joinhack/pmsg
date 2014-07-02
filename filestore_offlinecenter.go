@@ -419,6 +419,7 @@ func NewFileStoreOffline(srange, erange uint64, hub *MsgHub, path string) (c *Fi
 		rangeEnd:      erange,
 		archivedFiles: list.New(),
 	}
+	center.AddOfflineRouter(srange, erange, center.hubId)
 	err = nil
 	c = center
 	go center.archiveLoop()
