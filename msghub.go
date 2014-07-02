@@ -397,7 +397,11 @@ func (hub *MsgHub) Dispatch(msg RouteMsg) {
 	}
 	dest := msg.Destination()
 	id := int(hub.router[dest] & RouterMask)
-	if id == 0 && msg.Type() != TempRouteMsgType {
+	if id == 0 {
+		if msg.Type() == TempRouteMsgType {
+			//drop packet.
+			return
+		}
 		if hub.OfflineCenter != nil {
 			hub.OfflineCenter.ProcessMsg(msg)
 		} else {
