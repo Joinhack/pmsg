@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	OneConnectionForCluster = false
+	OneConnectionForPeer = false
 
 	OutofServerRange = errors.New("out of max server limits")
 
@@ -74,15 +74,13 @@ type MsgHub struct {
 	maxRange       uint64
 	router         []byte
 	servAddr       string
-	outgoing       [MaxRouter]*Conn //just for write
+	outgoing       [MaxRouter]*Conn //just for write when one conection for communication for peer reuse it
 	incoming       [MaxRouter]*Conn //just for read
 	clients        map[string]Client
 	routerOperChan chan *routerOper
 	listener       net.Listener
 	dropCount      uint64
 	_clientsMutex  *sync.Mutex
-	//a connection for read write
-	otherHubs [MaxRouter]*Conn
 	OfflineCenter
 	*StateNotifer
 }
@@ -316,6 +314,7 @@ func (hub *MsgHub) outgoingLoop(addr string, id uint64) {
 			if err != nil {
 				goto ERROR
 			}
+			conn.state = conn_ok
 			//rebuild remote router
 			if err = hub.rebuildRemoteRouter(conn); err != nil {
 				goto ERROR
@@ -356,13 +355,7 @@ func (hub *MsgHub) outgoingLoop(addr string, id uint64) {
 }
 
 func (hub *MsgHub) bordcastMsg(msg *RouteControlMsg) {
-	var outgings []*Conn
-	if OneConnectionForCluster {
-		outgings = hub.otherHubs[:]
-	} else {
-		outgings = hub.outgoing[:]
-	}
-	for _, conn := range outgings {
+	for _, conn := range hub.outgoing {
 		if conn != nil && conn.Conn != nil {
 			conn.wchan <- msg
 		}
@@ -402,11 +395,7 @@ func (hub *MsgHub) LocalDispatch(msg RouteMsg) {
 
 func (hub *MsgHub) RemoteDispatch(id int, msg RouteMsg) {
 	var outgoing *Conn
-	if OneConnectionForCluster {
-		outgoing = hub.otherHubs[id]
-	} else {
-		outgoing = hub.outgoing[id]
-	}
+	outgoing = hub.outgoing[id]
 	defer func() {
 		if err := recover(); err != nil {
 			//TODO: if outgoing write channel close,  should remove the outgoing from hub
@@ -551,6 +540,7 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 		hub.incoming[conn.id].Close()
 	}
 	hub.incoming[conn.id] = conn
+	conn.state = conn_ok
 	defer func() { hub.incoming[conn.id] = nil }()
 	for {
 		if err = hub.msgProc(conn); err != nil {
@@ -570,7 +560,7 @@ func (hub *MsgHub) ListenAndServe() error {
 		if c, err = hub.listener.Accept(); err != nil {
 			return err
 		}
-		if OneConnectionForCluster {
+		if OneConnectionForPeer {
 			go hub.inProc(c)
 		} else {
 			go hub.incomingLoop(c)
@@ -631,7 +621,7 @@ func (hub *MsgHub) outProc(id uint64, addr string) {
 	for {
 		var whoamiAck WhoamIMsg
 		var whoami *WhoamIMsg
-		conn := hub.otherHubs[id]
+		conn := hub.outgoing[id]
 		if conn != nil && conn.state == conn_ok {
 			time.Sleep(1 * time.Second)
 			continue
@@ -643,7 +633,7 @@ func (hub *MsgHub) outProc(id uint64, addr string) {
 			goto RETRY
 		}
 		conn.state = conn_handshake
-		hub.otherHubs[id] = conn
+		hub.outgoing[id] = conn
 		//register self in other hub
 		whoami = NewWhoamIMsg(hub.id)
 		_, err = conn.Write(whoami.Bytes())
@@ -663,7 +653,7 @@ func (hub *MsgHub) outProc(id uint64, addr string) {
 			panic("can't be happend.")
 		}
 		conn.state = conn_ok
-		hub.otherHubs[id] = conn
+		hub.outgoing[id] = conn
 		go hub.inLoop(conn)
 		hub.outLoop(conn)
 		continue
@@ -692,7 +682,7 @@ func (hub *MsgHub) inProc(c net.Conn) {
 		return
 	}
 
-	old := hub.otherHubs[whoami.Who]
+	old := hub.outgoing[whoami.Who]
 	if old != nil {
 		if old.state == conn_ok || old.state == conn_handshake {
 			return
@@ -705,7 +695,7 @@ func (hub *MsgHub) inProc(c net.Conn) {
 	}
 	conn := &Conn{id: uint64(whoami.Who), Conn: c}
 	conn.state = conn_ok
-	hub.otherHubs[conn.id] = conn
+	hub.outgoing[conn.id] = conn
 	go hub.outLoop(conn)
 	hub.inLoop(conn)
 }
@@ -718,7 +708,7 @@ func (hub *MsgHub) AddOtherHub(id int, addr string) (err error) {
 	if id == hub.id {
 		return DuplicateHubId
 	}
-	if OneConnectionForCluster {
+	if OneConnectionForPeer {
 		go hub.outProc(uint64(id), addr)
 	} else {
 		go hub.outgoingLoop(addr, uint64(id))

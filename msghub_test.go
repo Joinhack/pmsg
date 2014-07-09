@@ -8,7 +8,7 @@ import (
 )
 
 func init() {
-	OneConnectionForCluster = true
+	OneConnectionForPeer = true
 }
 
 func TestBitOper(t *testing.T) {

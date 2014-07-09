@@ -9,7 +9,7 @@ import (
 )
 
 func init() {
-	OneConnectionForCluster = true
+	OneConnectionForPeer = false
 }
 
 func TestOfflineCenterLocalDispatch(t *testing.T) {
