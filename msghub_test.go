@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+func init() {
+	OneConnectionForCluster = true
+}
+
 func TestBitOper(t *testing.T) {
 	hub := NewMsgHub(1, 1024*1024, ":9999")
 	hub.AddRoute(1, 1, 2, nil)
@@ -189,8 +193,8 @@ func TestKickoff1(t *testing.T) {
 
 	clientConn1 := NewSimpleClientConn(conn1, 1, 1)
 	clientConn2 := NewSimpleClientConn(conn2, 1, 1)
-	hub1.AddOutgoing(2, hub2Addr)
-	hub2.AddOutgoing(1, hub1Addr)
+	hub1.AddOtherHub(2, hub2Addr)
+	hub2.AddOtherHub(1, hub1Addr)
 	if err := hub1.AddClient(clientConn1); err != nil {
 		panic(err)
 	}
@@ -241,8 +245,8 @@ func TestKickoff2(t *testing.T) {
 
 	clientConn1 := NewSimpleClientConn(conn1, 1, 1)
 	clientConn2 := NewSimpleClientConn(conn2, 1, 1)
-	hub1.AddOutgoing(2, hub2Addr)
-	hub2.AddOutgoing(1, hub1Addr)
+	hub1.AddOtherHub(2, hub2Addr)
+	hub2.AddOtherHub(1, hub1Addr)
 	if err := hub1.AddClient(clientConn1); err != nil {
 		panic(err)
 	}
@@ -294,8 +298,8 @@ func TestRedirect(t *testing.T) {
 
 	clientConn1 := NewSimpleClientConn(conn1, 1, 1)
 	clientConn2 := NewSimpleClientConn(conn2, 1, 2)
-	hub1.AddOutgoing(2, hub2Addr)
-	hub2.AddOutgoing(1, hub1Addr)
+	hub1.AddOtherHub(2, hub2Addr)
+	hub2.AddOtherHub(1, hub1Addr)
 	if err := hub1.AddClient(clientConn1); err != nil {
 		panic(err)
 	}
@@ -351,8 +355,8 @@ func TestRemoteDispatch(t *testing.T) {
 	hub1.AddClient(clientConn1)
 	hub2.AddClient(clientConn2)
 	time.Sleep(10 * time.Millisecond)
-	hub1.AddOutgoing(2, hub2Addr)
-	hub2.AddOutgoing(1, hub1Addr)
+	hub1.AddOtherHub(2, hub2Addr)
+	hub2.AddOtherHub(1, hub1Addr)
 	time.Sleep(10 * time.Millisecond)
 	content1 := "hi1"
 	content2 := "hi2"
@@ -374,3 +378,4 @@ func TestRemoteDispatch(t *testing.T) {
 		t.Fail()
 	}
 }
+

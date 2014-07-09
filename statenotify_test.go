@@ -47,8 +47,8 @@ func TestStateNotifer(t *testing.T) {
 	clientConn2 := NewSimpleClientConn(conn2, 2, 1)
 
 	time.Sleep(10 * time.Millisecond)
-	hub1.AddOutgoing(2, hub2Addr)
-	hub2.AddOutgoing(1, hub1Addr)
+	hub1.AddOtherHub(2, hub2Addr)
+	hub2.AddOtherHub(1, hub1Addr)
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
 	elem := hub1.AddWatcher(2, func(e *StateEvent) {

@@ -2,7 +2,6 @@ package pmsg
 
 import (
 	"encoding/binary"
-	"io"
 )
 
 const (
@@ -16,6 +15,7 @@ const (
 
 const (
 	WhoamIControlType = iota
+	WhoamIAckControlType
 	AddRouteControlType
 	RemoveRouteControlType
 	OfflineControlType
@@ -100,6 +100,11 @@ func NewWhoamIMsg(who int) *WhoamIMsg {
 	return msg
 }
 
+func NewWhoamIAckMsg(who int) *WhoamIMsg {
+	msg := &WhoamIMsg{ControlType: WhoamIAckControlType, Who: who}
+	return msg
+}
+
 func (msg *RouteControlMsg) Len() int {
 	return 11
 }
@@ -133,13 +138,7 @@ func (msg *WhoamIMsg) Body() []byte {
 	return msg.Bytes()
 }
 
-func (msg *WhoamIMsg) Unmarshal(reader io.Reader) error {
-	var bs [3]byte
-	if n, err := reader.Read(bs[:]); err != nil {
-		return err
-	} else if n < msg.Len() {
-		return UnknownFramedMsg
-	}
+func (msg *WhoamIMsg) Unmarshal(bs []byte) error {
 	if len(bs) != msg.Len() {
 		return UnknownFramedMsg
 	}

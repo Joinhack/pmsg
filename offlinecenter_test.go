@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+func init() {
+	OneConnectionForCluster = true
+}
+
 func TestOfflineCenterLocalDispatch(t *testing.T) {
 	DefaultArchivedTime = 1
 	DefaultFlushTime = 1
@@ -109,8 +113,8 @@ func TestOfflineCenterRemoteDispatch(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	hub1Addr := fmt.Sprintf("127.0.0.1:%d", hub1.listener.Addr().(*net.TCPAddr).Port)
 	hub2Addr := fmt.Sprintf("127.0.0.1:%d", hub2.listener.Addr().(*net.TCPAddr).Port)
-	hub1.AddOutgoing(2, hub2Addr)
-	hub2.AddOutgoing(1, hub1Addr)
+	hub1.AddOtherHub(2, hub2Addr)
+	hub2.AddOtherHub(1, hub1Addr)
 	time.Sleep(10 * time.Millisecond)
 	servAddr := fmt.Sprintf("127.0.0.1:%d", ln.Addr().(*net.TCPAddr).Port)
 	conn1, _ := net.Dial("tcp", servAddr)
@@ -164,8 +168,8 @@ func TestOfflineCenterArchive(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	hub1Addr := fmt.Sprintf("127.0.0.1:%d", hub1.listener.Addr().(*net.TCPAddr).Port)
 	hub2Addr := fmt.Sprintf("127.0.0.1:%d", hub2.listener.Addr().(*net.TCPAddr).Port)
-	hub1.AddOutgoing(2, hub2Addr)
-	hub2.AddOutgoing(1, hub1Addr)
+	hub1.AddOtherHub(2, hub2Addr)
+	hub2.AddOtherHub(1, hub1Addr)
 	time.Sleep(10 * time.Millisecond)
 	wg := &sync.WaitGroup{}
 	for m := 0; m < 2; m++ {

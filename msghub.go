@@ -15,6 +15,8 @@ import (
 )
 
 var (
+	OneConnectionForCluster = false
+
 	OutofServerRange = errors.New("out of max server limits")
 
 	UnknownFramedMsg = errors.New("unknow framed msg")
@@ -29,14 +31,23 @@ var (
 
 	OutOfMaxRange = errors.New("Out of max range")
 
+	DuplicateHubId = errors.New("Dunplicate Hub Id")
+
 	TRACE *log.Logger = log.New(os.Stdout, "TRACE ", log.Ldate|log.Ltime|log.Lshortfile)
 	WARN  *log.Logger = log.New(os.Stdout, "WARN ", log.Ldate|log.Ltime|log.Lshortfile)
 	INFO  *log.Logger = log.New(os.Stdout, "INFO ", log.Ldate|log.Ltime|log.Lshortfile)
 	ERROR *log.Logger = log.New(os.Stderr, "ERROR ", log.Ldate|log.Ltime|log.Lshortfile)
 )
 
+const (
+	conn_closed    = 0
+	conn_handshake = 1
+	conn_ok        = 2
+)
+
 type Conn struct {
 	net.Conn
+	state byte //the connection state
 	wchan chan Msg
 	id    uint64
 }
@@ -50,7 +61,7 @@ type routerOper struct {
 }
 
 const (
-	RouterMaskBits = 1 << 6
+	MaxRouter      = 1 << 6
 	RouterMask     = 0x3f
 	RouterTypeMask = 0xc0
 	oper_add       = 0
@@ -63,15 +74,24 @@ type MsgHub struct {
 	maxRange       uint64
 	router         []byte
 	servAddr       string
-	outgoing       [RouterMaskBits]*Conn
-	incoming       [RouterMaskBits]*Conn
+	outgoing       [MaxRouter]*Conn //just for write
+	incoming       [MaxRouter]*Conn //just for read
 	clients        map[string]Client
 	routerOperChan chan *routerOper
 	listener       net.Listener
 	dropCount      uint64
 	_clientsMutex  *sync.Mutex
+	//a connection for read write
+	otherHubs [MaxRouter]*Conn
 	OfflineCenter
 	*StateNotifer
+}
+
+func (c *Conn) Close() {
+	c.state = conn_closed
+	if c.Conn != nil {
+		c.Conn.Close()
+	}
 }
 
 func toKey(id uint64, typ byte) string {
@@ -218,9 +238,9 @@ func (hub *MsgHub) RemoveRoute(d uint64, typ byte) {
 }
 
 type MsgHubFileStoreOfflineCenterConfig struct {
-	Id       int
-	MaxRange uint64
-	ServAddr string
+	Id                int
+	MaxRange          uint64
+	ServAddr          string
 	OfflineRangeStart uint64
 	OfflineRangeEnd   uint64
 	OfflinePath       string
@@ -336,8 +356,13 @@ func (hub *MsgHub) outgoingLoop(addr string, id uint64) {
 }
 
 func (hub *MsgHub) bordcastMsg(msg *RouteControlMsg) {
-	for _, conn := range hub.outgoing {
-
+	var outgings []*Conn
+	if OneConnectionForCluster {
+		outgings = hub.otherHubs[:]
+	} else {
+		outgings = hub.outgoing[:]
+	}
+	for _, conn := range outgings {
 		if conn != nil && conn.Conn != nil {
 			conn.wchan <- msg
 		}
@@ -376,7 +401,12 @@ func (hub *MsgHub) LocalDispatch(msg RouteMsg) {
 }
 
 func (hub *MsgHub) RemoteDispatch(id int, msg RouteMsg) {
-	outgoing := hub.outgoing[id]
+	var outgoing *Conn
+	if OneConnectionForCluster {
+		outgoing = hub.otherHubs[id]
+	} else {
+		outgoing = hub.outgoing[id]
+	}
 	defer func() {
 		if err := recover(); err != nil {
 			//TODO: if outgoing write channel close,  should remove the outgoing from hub
@@ -440,17 +470,66 @@ func readRouteMsgBody(reader io.Reader) (to uint64, body []byte, err error) {
 	return
 }
 
-func (hub *MsgHub) Incoming(id int) *Conn {
-	return hub.incoming[id]
-}
-
-func (hub *MsgHub) Outgoing(id int) *Conn {
-	return hub.outgoing[id]
+func (hub *MsgHub) msgProc(conn *Conn) (err error) {
+	var msgType byte
+	var controlType byte
+	reader := bufio.NewReader(conn.Conn)
+	msgType, err = reader.ReadByte()
+	if err != nil {
+		ERROR.Println("read from incoming error, detail:", err)
+		return
+	}
+	switch msgType {
+	case StringMsgType:
+		//drop msg, should be ping
+		var bs []byte
+		bs, err = reader.ReadSlice('\n')
+		if err != nil {
+			return
+		} else {
+			INFO.Println(conn.RemoteAddr().String(), "said:", string(bs[:len(bs)-1]))
+		}
+	case ControlMsgType: //cronntrol msg
+		if controlType, err = reader.ReadByte(); err != nil {
+			return
+		}
+		switch controlType {
+		case AddRouteControlType, RemoveRouteControlType:
+			var msg RouteControlMsg
+			var buf = make([]byte, msg.Len())
+			buf[0] = ControlMsgType
+			buf[1] = controlType
+			reader.Read(buf[2:])
+			if err = msg.Unmarshal(buf); err != nil {
+				return
+			}
+			if msg.ControlType == AddRouteControlType {
+				hub.AddRoute(msg.Id, msg.Type, int(conn.id), nil)
+			} else {
+				hub.RemoveRoute(msg.Id, msg.Type)
+			}
+		case OfflineControlType:
+			if err = hub.OfflineIncomingControlMsg(ControlMsgType, OfflineMsgType, reader); err != nil {
+				return
+			}
+		}
+	case RouteMsgType, TempRouteMsgType:
+		var msg DeliverMsg
+		if msg.To, msg.Carry, err = readRouteMsgBody(reader); err != nil {
+			return
+		}
+		msg.MsgType = msgType
+		hub.LocalDispatch(&msg)
+	case OfflineMsgType:
+		if err = hub.OfflineIncomingMsg(OfflineMsgType, reader); err != nil {
+			return
+		}
+	}
+	return nil
 }
 
 func (hub *MsgHub) incomingLoop(c net.Conn) {
 	var err error
-	reader := bufio.NewReader(c)
 
 	defer func() {
 		c.Close()
@@ -458,9 +537,13 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 			ERROR.Println(err)
 		}
 	}()
-
 	var whoami WhoamIMsg
-	if err = whoami.Unmarshal(reader); err != nil {
+	whoamiSli := make([]byte, whoami.Len())
+
+	if _, err = c.Read(whoamiSli); err != nil {
+		return
+	}
+	if err = whoami.Unmarshal(whoamiSli); err != nil {
 		return
 	}
 	conn := &Conn{id: uint64(whoami.Who), Conn: c}
@@ -469,60 +552,9 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 	}
 	hub.incoming[conn.id] = conn
 	defer func() { hub.incoming[conn.id] = nil }()
-	var msgType byte
-	var controlType byte
 	for {
-		msgType, err = reader.ReadByte()
-		if err != nil {
-			ERROR.Println("read from incoming error, detail:", err)
+		if err = hub.msgProc(conn); err != nil {
 			return
-		}
-		switch msgType {
-		case StringMsgType:
-			//drop msg, should be ping
-			var bs []byte
-			bs, err = reader.ReadSlice('\n')
-			if err != nil {
-				return
-			} else {
-				INFO.Println(c.RemoteAddr().String(), "said:", string(bs[:len(bs)-1]))
-			}
-		case ControlMsgType: //cronntrol msg
-			if controlType, err = reader.ReadByte(); err != nil {
-				return
-			}
-			switch controlType {
-			case AddRouteControlType, RemoveRouteControlType:
-				var msg RouteControlMsg
-				var buf = make([]byte, msg.Len())
-				buf[0] = ControlMsgType
-				buf[1] = controlType
-				reader.Read(buf[2:])
-				if err = msg.Unmarshal(buf); err != nil {
-					return
-				}
-				if msg.ControlType == AddRouteControlType {
-					hub.AddRoute(msg.Id, msg.Type, int(conn.id), nil)
-				} else {
-					hub.RemoveRoute(msg.Id, msg.Type)
-				}
-			case OfflineControlType:
-
-				if err = hub.OfflineIncomingControlMsg(ControlMsgType, OfflineMsgType, reader); err != nil {
-					return
-				}
-			}
-		case RouteMsgType, TempRouteMsgType:
-			var msg DeliverMsg
-			if msg.To, msg.Carry, err = readRouteMsgBody(reader); err != nil {
-				return
-			}
-			msg.MsgType = msgType
-			hub.LocalDispatch(&msg)
-		case OfflineMsgType:
-			if err = hub.OfflineIncomingMsg(OfflineMsgType, reader); err != nil {
-				return
-			}
 		}
 	}
 }
@@ -538,15 +570,158 @@ func (hub *MsgHub) ListenAndServe() error {
 		if c, err = hub.listener.Accept(); err != nil {
 			return err
 		}
-		go hub.incomingLoop(c)
+		if OneConnectionForCluster {
+			go hub.inProc(c)
+		} else {
+			go hub.incomingLoop(c)
+		}
 	}
 }
 
-func (hub *MsgHub) AddOutgoing(id int, addr string) (err error) {
+func (hub *MsgHub) inLoop(conn *Conn) {
+	var err error
+	defer func() {
+		WARN.Println("in loop quit:", conn.id)
+		conn.Close()
+		if err != nil {
+			ERROR.Println(err)
+		}
+	}()
+	for conn.state == conn_ok {
+		if err = hub.msgProc(conn); err != nil {
+			return
+		}
+	}
+}
+
+func (hub *MsgHub) outLoop(conn *Conn) {
+	var err error
+	defer func() {
+		WARN.Println("out loop quit:", conn.id)
+		conn.Close()
+		if err != nil {
+			ERROR.Println(err)
+		}
+	}()
+	//rebuild remote router
+	if err = hub.rebuildRemoteRouter(conn); err != nil {
+		return
+	}
+	if hub.OfflineCenter != nil {
+		if err = hub.OfflineOutgoingPrepared(conn); err != nil {
+			return
+		}
+	}
+
+	var msg Msg
+	for conn.state == conn_ok {
+		select {
+		case msg = <-conn.wchan: //the channel will never closed.
+		case <-time.After(2 * time.Second):
+			msg = Ping
+		}
+		if _, err = conn.Write(msg.Bytes()); err != nil {
+			return
+		}
+	}
+}
+
+func (hub *MsgHub) outProc(id uint64, addr string) {
+	var err error
+	for {
+		var whoamiAck WhoamIMsg
+		var whoami *WhoamIMsg
+		conn := hub.otherHubs[id]
+		if conn != nil && conn.state == conn_ok {
+			time.Sleep(1 * time.Second)
+			continue
+		}
+		whoamiSli := make([]byte, whoamiAck.Len())
+		conn = &Conn{id: uint64(id), wchan: make(chan Msg, 1)}
+		conn.Conn, err = net.Dial("tcp", addr)
+		if err != nil {
+			goto RETRY
+		}
+		conn.state = conn_handshake
+		hub.otherHubs[id] = conn
+		//register self in other hub
+		whoami = NewWhoamIMsg(hub.id)
+		_, err = conn.Write(whoami.Bytes())
+		if err != nil {
+			goto RETRY
+		}
+
+		if _, err = conn.Read(whoamiSli); err != nil {
+			conn.Close()
+			goto RETRY
+		}
+		if err = whoamiAck.Unmarshal(whoamiSli); err != nil {
+			conn.Close()
+			goto RETRY
+		}
+		if uint64(whoamiAck.Who) != id {
+			panic("can't be happend.")
+		}
+		conn.state = conn_ok
+		hub.otherHubs[id] = conn
+		go hub.inLoop(conn)
+		hub.outLoop(conn)
+		continue
+	RETRY:
+		time.Sleep(2 * time.Second)
+		ERROR.Println("connection to", addr, "fail, retry after 2 sec.")
+	}
+}
+
+func (hub *MsgHub) inProc(c net.Conn) {
+	var err error
+
+	defer func() {
+		c.Close()
+		if err != nil {
+			ERROR.Println(err)
+		}
+	}()
+	var whoami WhoamIMsg
+	whoamiSli := make([]byte, whoami.Len())
+
+	if _, err = c.Read(whoamiSli); err != nil {
+		return
+	}
+	if err = whoami.Unmarshal(whoamiSli); err != nil {
+		return
+	}
+
+	old := hub.otherHubs[whoami.Who]
+	if old != nil {
+		if old.state == conn_ok || old.state == conn_handshake {
+			return
+		} else {
+			old.Close()
+		}
+	}
+	if _, err = c.Write(NewWhoamIAckMsg(hub.id).Bytes()); err != nil {
+		return
+	}
+	conn := &Conn{id: uint64(whoami.Who), Conn: c}
+	conn.state = conn_ok
+	hub.otherHubs[conn.id] = conn
+	go hub.outLoop(conn)
+	hub.inLoop(conn)
+}
+
+func (hub *MsgHub) AddOtherHub(id int, addr string) (err error) {
 	if id >= len(hub.outgoing) || id < 0 {
 		err = OutofServerRange
 		return
 	}
-	go hub.outgoingLoop(addr, uint64(id))
+	if id == hub.id {
+		return DuplicateHubId
+	}
+	if OneConnectionForCluster {
+		go hub.outProc(uint64(id), addr)
+	} else {
+		go hub.outgoingLoop(addr, uint64(id))
+	}
 	return
 }
