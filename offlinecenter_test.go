@@ -8,9 +8,6 @@ import (
 	"time"
 )
 
-func init() {
-	OneConnectionForPeer = false
-}
 
 func TestOfflineCenterLocalDispatch(t *testing.T) {
 	DefaultArchivedTime = 1
@@ -24,10 +21,13 @@ func TestOfflineCenterLocalDispatch(t *testing.T) {
 	}
 	hub := NewMsgHubWithFileStoreOfflineCenter(cfg)
 	ln, _ := net.Listen("tcp", ":0")
+	defer func(){
+		hub.Close()
+	}()
 	go func() {
 		for {
 			if c, err := ln.Accept(); err != nil {
-				panic(err)
+				return
 			} else {
 				go func(conn net.Conn) {
 					var buf [1024]byte
@@ -61,6 +61,7 @@ func TestOfflineCenterLocalDispatch(t *testing.T) {
 	if err := hub.AddClient(clientConn2); err != nil {
 		panic(err)
 	}
+	ln.Close()
 	time.Sleep(1 * time.Second)
 	hub.RemoveClient(clientConn1)
 	clientConn1.Close()
@@ -91,10 +92,14 @@ func TestOfflineCenterRemoteDispatch(t *testing.T) {
 	}
 	hub2 := NewMsgHubWithFileStoreOfflineCenter(cfg)
 	ln, _ := net.Listen("tcp", ":0")
+	defer func(){
+		hub1.Close()
+		hub2.Close()
+	}()
 	go func() {
 		for {
 			if c, err := ln.Accept(); err != nil {
-				panic(err)
+				return
 			} else {
 				go func(conn net.Conn) {
 					var buf [1024]byte
@@ -115,7 +120,7 @@ func TestOfflineCenterRemoteDispatch(t *testing.T) {
 	hub2Addr := fmt.Sprintf("127.0.0.1:%d", hub2.listener.Addr().(*net.TCPAddr).Port)
 	hub1.AddOtherHub(2, hub2Addr)
 	hub2.AddOtherHub(1, hub1Addr)
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 	servAddr := fmt.Sprintf("127.0.0.1:%d", ln.Addr().(*net.TCPAddr).Port)
 	conn1, _ := net.Dial("tcp", servAddr)
 	conn2, _ := net.Dial("tcp", servAddr)
@@ -141,7 +146,7 @@ func TestOfflineCenterRemoteDispatch(t *testing.T) {
 	clientConn1.Close()
 	clientConn2.Close()
 	time.Sleep(20 * time.Millisecond)
-
+	ln.Close()
 }
 
 func TestOfflineCenterArchive(t *testing.T) {
@@ -163,6 +168,10 @@ func TestOfflineCenterArchive(t *testing.T) {
 		OfflinePath:       "/tmp",
 	}
 	hub2 := NewMsgHubWithFileStoreOfflineCenter(cfg)
+	defer func(){
+		hub1.Close()
+		hub2.Close()
+	}()
 	go hub1.ListenAndServe()
 	go hub2.ListenAndServe()
 	time.Sleep(10 * time.Millisecond)
@@ -170,7 +179,7 @@ func TestOfflineCenterArchive(t *testing.T) {
 	hub2Addr := fmt.Sprintf("127.0.0.1:%d", hub2.listener.Addr().(*net.TCPAddr).Port)
 	hub1.AddOtherHub(2, hub2Addr)
 	hub2.AddOtherHub(1, hub1Addr)
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	wg := &sync.WaitGroup{}
 	for m := 0; m < 2; m++ {
 		wg.Add(1)

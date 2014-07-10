@@ -10,6 +10,8 @@ const (
 	OfflineState
 )
 
+var StateNotiferNum = 10
+
 type StateEvent struct {
 	State   byte
 	Id      uint64
@@ -75,9 +77,13 @@ func (notifer *StateNotifer) RemoveWatcher(e *list.Element) {
 
 func (notifer *StateNotifer) stateProcess(i int) {
 	var event *StateEvent
+	var ok bool
 	for {
 		select {
-		case event = <-notifer.stateTaskChans[i]:
+		case event, ok = <-notifer.stateTaskChans[i]:
+			if !ok {
+				return
+			}
 			notifer.stateMutex[i].Lock()
 			if l, ok := notifer.watchers[i][event.Id]; ok {
 				for e := l.Front(); e != nil; e = e.Next() {
@@ -104,5 +110,11 @@ func (notifer *StateNotifer) notifyLogon(id uint64, devType byte) {
 		Id:      id,
 		DevType: devType,
 		State:   OnlineState,
+	}
+}
+
+func (notifer *StateNotifer) Close() {
+	for _, c := range notifer.stateTaskChans {
+		close(c)
 	}
 }

@@ -3,16 +3,35 @@ package pmsg
 import (
 	"fmt"
 	"net"
+	"os"
+	"log"
 	"testing"
 	"time"
 )
 
+var delta time.Duration
+
 func init() {
 	OneConnectionForPeer = true
+	StateNotiferNum = 1
+	writer, _ := os.OpenFile(os.DevNull, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	ERROR = log.New(writer, "", 0)
+	INFO = log.New(writer, "", 0)
+	WARN = log.New(writer, "", 0)
+	TRACE = log.New(writer, "", 0)
+
+	if OneConnectionForPeer {
+		delta = 10
+	} else {
+		delta = 10
+	}
 }
 
 func TestBitOper(t *testing.T) {
 	hub := NewMsgHub(1, 1024*1024, ":9999")
+	defer func(){
+		hub.Close()
+	}()
 	hub.AddRoute(1, 1, 2, nil)
 	time.Sleep(1 * time.Millisecond)
 	if hub.router[1]&RouterMask != 2 {
@@ -47,10 +66,13 @@ func TestBitOper(t *testing.T) {
 func TestLocalDispatch(t *testing.T) {
 	hub := NewMsgHub(1, 1024*1024, ":0")
 	ln, _ := net.Listen("tcp", ":0")
+	defer func(){
+		hub.Close()
+	}()
 	go func() {
 		for {
 			if c, err := ln.Accept(); err != nil {
-				panic(err)
+				return
 			} else {
 				go func(conn net.Conn) {
 					var buf [1024]byte
@@ -91,7 +113,7 @@ func TestLocalDispatch(t *testing.T) {
 	clientConn2.Close()
 	clientConn1.Close()
 	time.Sleep(20 * time.Millisecond)
-
+	ln.Close()
 	t.Log(hub.router[1])
 	if hub.router[1] != 0 || hub.router[2] != 0 {
 		t.Fail()
@@ -100,11 +122,14 @@ func TestLocalDispatch(t *testing.T) {
 
 func Test2DevDispatch(t *testing.T) {
 	hub := NewMsgHub(1, 1024*1024, ":0")
+	defer func(){
+		hub.Close()
+	}()
 	ln, _ := net.Listen("tcp", ":0")
 	go func() {
 		for {
 			if c, err := ln.Accept(); err != nil {
-				panic(err)
+				return
 			} else {
 				go func(conn net.Conn) {
 					var buf [1024]byte
@@ -135,7 +160,7 @@ func Test2DevDispatch(t *testing.T) {
 	if err := hub.AddClient(clientConn2); err != nil {
 		panic(err)
 	}
-	time.Sleep(1 * time.Millisecond)
+	time.Sleep(delta * time.Millisecond)
 	content1 := "hi1"
 	hub.Dispatch(&DeliverMsg{To: 1, Carry: []byte(content1)})
 	hub.RemoveClient(clientConn1)
@@ -149,7 +174,7 @@ func Test2DevDispatch(t *testing.T) {
 	clientConn2.Close()
 	clientConn1.Close()
 	time.Sleep(2 * time.Millisecond)
-
+	ln.Close()
 	t.Log(hub.router[1])
 	if hub.router[1] != 0 {
 		t.Fail()
@@ -160,6 +185,10 @@ func TestKickoff1(t *testing.T) {
 	hub1 := NewMsgHub(1, 1024*1024, ":0")
 	hub2 := NewMsgHub(2, 1024*1024, ":0")
 	ln, _ := net.Listen("tcp", ":0")
+	defer func(){
+		hub1.Close()
+		hub2.Close()
+	}()
 	go func() {
 		for {
 			if c, err := ln.Accept(); err != nil {
@@ -195,6 +224,7 @@ func TestKickoff1(t *testing.T) {
 	clientConn2 := NewSimpleClientConn(conn2, 1, 1)
 	hub1.AddOtherHub(2, hub2Addr)
 	hub2.AddOtherHub(1, hub1Addr)
+	time.Sleep(100 * time.Millisecond)
 	if err := hub1.AddClient(clientConn1); err != nil {
 		panic(err)
 	}
@@ -202,16 +232,22 @@ func TestKickoff1(t *testing.T) {
 		panic(err)
 	}
 
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(delta * time.Millisecond)
+	ln.Close()
 	if clientConn1.IsKickoff() != true || clientConn2.IsKickoff() != true {
 		t.Fail()
 	}
+
 }
 
 func TestKickoff2(t *testing.T) {
 	hub1 := NewMsgHub(1, 1024*1024, ":0")
 	hub2 := NewMsgHub(2, 1024*1024, ":0")
 	ln, _ := net.Listen("tcp", ":0")
+	defer func(){
+		hub1.Close()
+		hub2.Close()
+	}()
 	go func() {
 		for {
 			if c, err := ln.Accept(); err != nil {
@@ -250,12 +286,16 @@ func TestKickoff2(t *testing.T) {
 	if err := hub1.AddClient(clientConn1); err != nil {
 		panic(err)
 	}
-	time.Sleep(1 * time.Millisecond)
+
+	time.Sleep(110 * time.Millisecond)
+
 	if err := hub2.AddClient(clientConn2); err != nil {
 		panic(err)
 	}
 
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
+
+	ln.Close()
 	if clientConn1.IsKickoff() != true || clientConn2.IsKickoff() != false || hub1.router[1] != hub2.router[1] {
 		t.Fail()
 	}
@@ -265,6 +305,10 @@ func TestRedirect(t *testing.T) {
 	hub1 := NewMsgHub(1, 1024*1024, ":0")
 	hub2 := NewMsgHub(2, 1024*1024, ":0")
 	ln, _ := net.Listen("tcp", ":0")
+	defer func(){
+		hub1.Close()
+		hub2.Close()
+	}()
 	go func() {
 		for {
 			if c, err := ln.Accept(); err != nil {
@@ -300,6 +344,7 @@ func TestRedirect(t *testing.T) {
 	clientConn2 := NewSimpleClientConn(conn2, 1, 2)
 	hub1.AddOtherHub(2, hub2Addr)
 	hub2.AddOtherHub(1, hub1Addr)
+	time.Sleep(delta * time.Millisecond)
 	if err := hub1.AddClient(clientConn1); err != nil {
 		panic(err)
 	}
@@ -308,7 +353,8 @@ func TestRedirect(t *testing.T) {
 		t.Fail()
 	}
 
-	time.Sleep(1 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
+	ln.Close()
 	t.Log(hub1.router[1], hub2.router[1])
 	if hub1.router[1]&RouterMask != hub2.router[1]&RouterMask {
 		t.Fail()
@@ -319,6 +365,10 @@ func TestRemoteDispatch(t *testing.T) {
 	hub1 := NewMsgHub(1, 1024*1024, ":0")
 	hub2 := NewMsgHub(2, 1024*1024, ":0")
 	ln, _ := net.Listen("tcp", ":0")
+	defer func(){
+		hub1.Close()
+		hub2.Close()
+	}()
 	go func() {
 		for {
 			if c, err := ln.Accept(); err != nil {
@@ -357,7 +407,7 @@ func TestRemoteDispatch(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	hub1.AddOtherHub(2, hub2Addr)
 	hub2.AddOtherHub(1, hub1Addr)
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond)
 	content1 := "hi1"
 	content2 := "hi2"
 	hub2.Dispatch(&DeliverMsg{To: 1, Carry: []byte(content1)})
@@ -371,6 +421,7 @@ func TestRemoteDispatch(t *testing.T) {
 	clientConn2.Close()
 	clientConn1.Close()
 	time.Sleep(20 * time.Millisecond)
+	ln.Close()
 	if hub1.router[1] != 0 || hub1.router[2] != 0 {
 		t.Fail()
 	}

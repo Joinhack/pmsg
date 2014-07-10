@@ -13,4 +13,5 @@ type OfflineCenter interface {
 	OfflineMsgReplay(id uint64)
 	OfflineIncomingMsg(byte, io.Reader) error
 	OfflineIncomingControlMsg(byte, byte, io.Reader) error
+	Close()
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 )
 
+
 func TestStateNotifer(t *testing.T) {
 	hub1 := NewMsgHub(1, 1024*1024, ":0")
 	hub2 := NewMsgHub(2, 1024*1024, ":0")
@@ -39,6 +40,8 @@ func TestStateNotifer(t *testing.T) {
 	conn1, _ := net.Dial("tcp", servAddr)
 	conn2, _ := net.Dial("tcp", servAddr)
 	defer func() {
+		hub1.Close()
+		hub2.Close()
 		conn1.Close()
 		conn2.Close()
 	}()
@@ -57,6 +60,7 @@ func TestStateNotifer(t *testing.T) {
 	})
 
 	hub1.AddClient(clientConn1)
+	time.Sleep(200 * time.Millisecond)
 	hub2.AddClient(clientConn2)
 	wg.Wait()
 	hub1.RemoveWatcher(elem)

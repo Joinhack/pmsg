@@ -100,6 +100,10 @@ func _readMsg(reader *bufio.Reader) (body []byte, err error) {
 	return
 }
 
+func (st *offlineSubTask) Close() {
+
+}
+
 func (st *offlineSubTask) replayMsgFromFile(id uint64) {
 	hub := st.hub
 	var finfo os.FileInfo
@@ -517,4 +521,11 @@ func (c *FileStoreOffline) OfflineIncomingControlMsg(control byte, controlType b
 		return
 	}
 	return c.AddOfflineRouter(msg.RangeStart, msg.RangeEnd, int(msg.HubId))
+}
+
+func (c *FileStoreOffline) Close() {
+	close(c.wchan)
+	for _, task := range c.subTask {
+		task.Close()
+	}
 }
