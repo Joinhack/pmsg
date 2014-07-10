@@ -650,35 +650,39 @@ func (hub *MsgHub) outLoop(conn *Conn) {
 func (hub *MsgHub) outProc(id uint64, addr string) {
 	var err error
 	var wait time.Duration
+	var conn *Conn
 	for hub.running {
 		var whoamiAck WhoamIMsg
 		var whoami *WhoamIMsg
 		var old *Conn
+
+		//if connection is ok or handleshake, just wait a moment.
+		//if in handleshake wait finish the handleshake.
 		hub.clusterMutex.Lock()
-		conn := hub.outgoing[id]
-		hub.clusterMutex.Unlock()
-		wait = 100
-		
+		conn = hub.outgoing[id]
 		if conn != nil && conn.state != conn_closed {
+			hub.clusterMutex.Unlock()
 			time.Sleep(1000 * time.Millisecond)
 			continue
 		}
+		hub.clusterMutex.Unlock()
 		whoamiSli := make([]byte, whoamiAck.Len())
 		conn = &Conn{id: uint64(id)}
 		conn.Conn, err = net.Dial("tcp", addr)
 		if err != nil {
-			//if can't connection 1 second retry
+			//if the peer is not listen. need more time.
 			wait = 1000
 			goto RETRY
 		}
 		conn.state = conn_handshake
-		//register self in other hub
+		//handleshake with the peer.
 		whoami = NewWhoamIMsg(hub.id)
 		_, err = conn.Write(whoami.Bytes())
 		if err != nil {
 			goto RETRY
 		}
-
+		//wait for the peer give the ack if every thing is fine.
+		//if the peer found already have a connection for this peer, should close the connection.
 		if _, err = conn.Read(whoamiSli); err != nil {
 			conn.Close()
 			goto RETRY
