@@ -496,7 +496,7 @@ func (hub *MsgHub) msgProc(conn *Conn) (err error) {
 		if err != nil {
 			return
 		} else {
-			INFO.Println(conn.RemoteAddr().String(), "said:", string(bs[:len(bs)-1]))
+			INFO.Println(conn.id, "said:", string(bs[:len(bs)-1]))
 		}
 	case ControlMsgType: //cronntrol msg
 		if controlType, err = reader.ReadByte(); err != nil {
