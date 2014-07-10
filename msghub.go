@@ -662,7 +662,7 @@ func (hub *MsgHub) outProc(id uint64, addr string) {
 		conn = hub.outgoing[id]
 		if conn != nil && conn.state != conn_closed {
 			hub.clusterMutex.Unlock()
-			time.Sleep(1000 * time.Millisecond)
+			time.Sleep(2000 * time.Millisecond)
 			continue
 		}
 		hub.clusterMutex.Unlock()
@@ -671,7 +671,7 @@ func (hub *MsgHub) outProc(id uint64, addr string) {
 		conn.Conn, err = net.Dial("tcp", addr)
 		if err != nil {
 			//if the peer is not listen. need more time.
-			wait = 1000
+			wait = 2000
 			goto RETRY
 		}
 		conn.state = conn_handshake
