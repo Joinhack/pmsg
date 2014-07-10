@@ -74,7 +74,7 @@ type MsgHub struct {
 	maxRange       uint64
 	router         []byte
 	servAddr       string
-	outgoing       [MaxRouter]*Conn //just for write when one conection for communication for peer reuse it
+	outgoing       [MaxRouter]*Conn //just for write, when one conection for communication for peer reuse it
 	incoming       [MaxRouter]*Conn //just for read
 	clients        map[string]Client
 	routerOperChan chan *routerOper
