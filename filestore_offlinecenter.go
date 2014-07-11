@@ -483,7 +483,7 @@ func (c *FileStoreOffline) ProcessMsg(msg RouteMsg) {
 	}
 }
 
-func (c *FileStoreOffline) OfflineOutgoingPrepared(conn *Conn) (err error) {
+func (c *FileStoreOffline) OfflineOutgoingPrepared(conn io.Writer) (err error) {
 	hub := c.hub
 	if hub.OfflineCenter == nil {
 		return nil

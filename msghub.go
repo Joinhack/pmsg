@@ -13,10 +13,9 @@ import (
 	"sync/atomic"
 	"time"
 )
+const OneConnectionForPeer = false
 
 var (
-	OneConnectionForPeer = true
-
 	OutofServerRange = errors.New("out of max server limits")
 
 	UnknownFramedMsg = errors.New("unknow framed msg")
@@ -41,7 +40,6 @@ var (
 
 const (
 	conn_closed    = 0
-	conn_handshake = 1
 	conn_ok        = 2
 )
 
@@ -49,7 +47,7 @@ type Conn struct {
 	net.Conn
 	state byte //the connection state
 	wchan chan Msg
-	id    uint64
+	id    int
 }
 
 type routerOper struct {
@@ -97,7 +95,6 @@ func (c *Conn) Close() {
 	if c.Conn != nil {
 		c.Conn.Close()
 	}
-	close(c.wchan)
 }
 
 func toKey(id uint64, typ byte) string {
@@ -281,6 +278,12 @@ func NewMsgHub(id int, maxRange uint64, servAddr string) *MsgHub {
 		StateNotifer:   newStateNotifer(StateNotiferNum),
 	}
 
+	if OneConnectionForPeer {
+		for i := 0; i < len(hub.outgoing); i++ {
+			hub.outgoing[i] = &Conn{wchan: make(chan Msg), id:i}
+		}
+	}
+
 	go hub.processRouterOper()
 	return hub
 }
@@ -297,7 +300,7 @@ func (hub *MsgHub) MaxRange() uint64 {
 	return hub.maxRange
 }
 
-func (hub *MsgHub) rebuildRemoteRouter(conn *Conn) error {
+func (hub *MsgHub) rebuildRemoteRouter(conn io.Writer) error {
 	hub._clientsMutex.Lock()
 	defer hub._clientsMutex.Unlock()
 	var routeControlMsg RouteControlMsg
@@ -312,14 +315,14 @@ func (hub *MsgHub) rebuildRemoteRouter(conn *Conn) error {
 	return nil
 }
 
-func (hub *MsgHub) outgoingLoop(addr string, id uint64) {
+func (hub *MsgHub) outgoingLoop(addr string, id int) {
 	var err error
 	var msg Msg
 	var ok bool
-	conn := &Conn{id: uint64(id), wchan: make(chan Msg, 1)}
+	conn := &Conn{id: id, wchan: make(chan Msg, 1)}
 	hub.outgoing[id] = conn
 	for hub.running {
-		if conn.Conn == nil {
+		if conn.state == conn_closed {
 			conn.Conn, err = net.Dial("tcp", addr)
 			if err != nil {
 				ERROR.Println("connection to", addr, "fail, retry after 2 sec.")
@@ -355,7 +358,7 @@ func (hub *MsgHub) outgoingLoop(addr string, id uint64) {
 		case <-time.After(2 * time.Second):
 			msg = Ping
 		}
-		if conn.Conn == nil {
+		if conn.state == conn_closed {
 			//if the connection is offline, I will drop msg.
 			continue
 		}
@@ -366,7 +369,6 @@ func (hub *MsgHub) outgoingLoop(addr string, id uint64) {
 			ERROR.Println(err)
 			//close connection and reconnection later
 			conn.Close()
-			conn.Conn = nil
 			continue
 		}
 		//if no err clear msg
@@ -376,7 +378,7 @@ func (hub *MsgHub) outgoingLoop(addr string, id uint64) {
 
 func (hub *MsgHub) bordcastMsg(msg *RouteControlMsg) {
 	for _, conn := range hub.outgoing {
-		if conn != nil && conn.Conn != nil {
+		if conn != nil && conn.state == conn_ok {
 			conn.wchan <- msg
 		}
 	}
@@ -479,10 +481,10 @@ func readRouteMsgBody(reader io.Reader) (to uint64, body []byte, err error) {
 	return
 }
 
-func (hub *MsgHub) msgProc(conn *Conn) (err error) {
+func (hub *MsgHub) msgProc(id int, reader *bufio.Reader) (err error) {
 	var msgType byte
 	var controlType byte
-	reader := bufio.NewReader(conn.Conn)
+	
 	msgType, err = reader.ReadByte()
 	if err != nil {
 		ERROR.Println("read from incoming error, detail:", err)
@@ -496,7 +498,7 @@ func (hub *MsgHub) msgProc(conn *Conn) (err error) {
 		if err != nil {
 			return
 		} else {
-			INFO.Println(conn.id, "said:", string(bs[:len(bs)-1]))
+			INFO.Println(id, "said:", string(bs[:len(bs)-1]))
 		}
 	case ControlMsgType: //cronntrol msg
 		if controlType, err = reader.ReadByte(); err != nil {
@@ -513,7 +515,7 @@ func (hub *MsgHub) msgProc(conn *Conn) (err error) {
 				return
 			}
 			if msg.ControlType == AddRouteControlType {
-				hub.AddRoute(msg.Id, msg.Type, int(conn.id), nil)
+				hub.AddRoute(msg.Id, msg.Type, id, nil)
 			} else {
 				hub.RemoveRoute(msg.Id, msg.Type)
 			}
@@ -545,7 +547,7 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 			ERROR.Println(e)
 		}
 		c.Close()
-		if err != nil {
+		if err != nil && err != io.EOF {
 			ERROR.Println(err)
 		}
 	}()
@@ -558,15 +560,16 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 	if err = whoami.Unmarshal(whoamiSli); err != nil {
 		return
 	}
-	conn := &Conn{id: uint64(whoami.Who), Conn: c}
+	conn := &Conn{id: int(whoami.Who), Conn: c}
 	if hub.incoming[conn.id] != nil {
 		hub.incoming[conn.id].Close()
 	}
 	hub.incoming[conn.id] = conn
 	conn.state = conn_ok
 	defer func() { hub.incoming[conn.id] = nil }()
+	reader := bufio.NewReader(conn)
 	for hub.running {
-		if err = hub.msgProc(conn); err != nil {
+		if err = hub.msgProc(conn.id, reader); err != nil {
 			return
 		}
 	}
@@ -604,8 +607,9 @@ func (hub *MsgHub) inLoop(conn *Conn) {
 			ERROR.Println(err)
 		}
 	}()
-	for conn.state == conn_ok {
-		if err = hub.msgProc(conn); err != nil {
+	reader := bufio.NewReader(conn)
+	for  {
+		if err = hub.msgProc(conn.id, reader); err != nil {
 			return
 		}
 	}
@@ -631,7 +635,7 @@ func (hub *MsgHub) outLoop(conn *Conn) {
 	}
 
 	var msg Msg
-	for conn.state == conn_ok {
+	for {
 		var ok bool
 		select {
 		case msg, ok = <-conn.wchan: //the channel will never closed.
@@ -651,6 +655,7 @@ func (hub *MsgHub) outProc(id uint64, addr string) {
 	var err error
 	var wait time.Duration
 	var conn *Conn
+	var connect net.Conn
 	for hub.running {
 		var whoamiAck WhoamIMsg
 		var whoami *WhoamIMsg
@@ -667,45 +672,47 @@ func (hub *MsgHub) outProc(id uint64, addr string) {
 		}
 		hub.clusterMutex.Unlock()
 		whoamiSli := make([]byte, whoamiAck.Len())
-		conn = &Conn{id: uint64(id)}
-		conn.Conn, err = net.Dial("tcp", addr)
+		connect, err = net.Dial("tcp", addr)
 		if err != nil {
 			//if the peer is not listen. need more time.
 			wait = 2000
 			goto RETRY
 		}
-		conn.state = conn_handshake
 		//handleshake with the peer.
 		whoami = NewWhoamIMsg(hub.id)
-		_, err = conn.Write(whoami.Bytes())
+		_, err = connect.Write(whoami.Bytes())
 		if err != nil {
 			goto RETRY
 		}
 		//wait for the peer give the ack if every thing is fine.
 		//if the peer found already have a connection for this peer, should close the connection.
-		if _, err = conn.Read(whoamiSli); err != nil {
-			conn.Close()
+		if _, err = connect.Read(whoamiSli); err != nil {
+			connect.Close()
 			goto RETRY
 		}
 		if err = whoamiAck.Unmarshal(whoamiSli); err != nil {
-			conn.Close()
+			connect.Close()
 			goto RETRY
 		}
 		if uint64(whoamiAck.Who) != id {
 			panic("can't be happend.")
 		}
-		conn.state = conn_ok
 		//dual check
 		hub.clusterMutex.Lock()
 		old = hub.outgoing[id]
 		if old != nil {
+			if old.state == conn_ok && byte(old.id) < byte(hub.id) {
+				hub.clusterMutex.Unlock()
+				conn.Close()
+				continue
+			}
 			old.Close()
 		}
-		conn.wchan = make(chan Msg, 1)
-		hub.outgoing[id] = conn
+		old.Conn = connect
+		old.state = conn_ok
 		hub.clusterMutex.Unlock()
-		go hub.inLoop(conn)
-		hub.outLoop(conn)
+		go hub.inLoop(old)
+		hub.outLoop(old)
 		continue
 	RETRY:
 		time.Sleep(time.Duration(wait) * time.Millisecond)
@@ -734,7 +741,9 @@ func (hub *MsgHub) inProc(c net.Conn) {
 	hub.clusterMutex.Lock()
 	old := hub.outgoing[whoami.Who]
 	if old != nil {
-		if old.state != conn_closed {
+		if old.state == conn_ok && byte(old.id) > byte(hub.id) {
+			//I think the old should be occupation by outProc
+			//I use the smaller id in active conection
 			hub.clusterMutex.Unlock()
 			return
 		} else {
@@ -745,19 +754,21 @@ func (hub *MsgHub) inProc(c net.Conn) {
 	if _, err = c.Write(NewWhoamIAckMsg(hub.id).Bytes()); err != nil {
 		return
 	}
-	conn := &Conn{id: uint64(whoami.Who), Conn: c}
-	conn.wchan = make(chan Msg, 1)
-	conn.state = conn_ok
 	//dual check
 	hub.clusterMutex.Lock()
 	old = hub.outgoing[whoami.Who]
 	if old != nil {
+		if old.state == conn_ok && byte(old.id) > byte(hub.id) {
+			hub.clusterMutex.Unlock()
+			return
+		}
 		old.Close()
 	}
-	hub.outgoing[conn.id] = conn
+	old.Conn = c
+	old.state = conn_ok
 	hub.clusterMutex.Unlock()
-	go hub.outLoop(conn)
-	hub.inLoop(conn)
+	go hub.outLoop(old)
+	hub.inLoop(old)
 }
 
 func (hub *MsgHub) AddOtherHub(id int, addr string) (err error) {
@@ -771,12 +782,13 @@ func (hub *MsgHub) AddOtherHub(id int, addr string) (err error) {
 	if OneConnectionForPeer {
 		go hub.outProc(uint64(id), addr)
 	} else {
-		go hub.outgoingLoop(addr, uint64(id))
+		go hub.outgoingLoop(addr, id)
 	}
 	return
 }
 
 func (hub *MsgHub) Close() {
+	INFO.Println("hub:", hub.id, "close.")
 	hub.running = false
 	close(hub.routerOperChan)
 	if hub.listener != nil {

@@ -12,7 +12,6 @@ import (
 var delta time.Duration
 
 func init() {
-	OneConnectionForPeer = true
 	StateNotiferNum = 1
 	writer, _ := os.OpenFile(os.DevNull, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	ERROR = log.New(writer, "", 0)
@@ -224,15 +223,16 @@ func TestKickoff1(t *testing.T) {
 	clientConn2 := NewSimpleClientConn(conn2, 1, 1)
 	hub1.AddOtherHub(2, hub2Addr)
 	hub2.AddOtherHub(1, hub1Addr)
-	time.Sleep(100 * time.Millisecond)
+	for hub1.outgoing[2] == nil || hub2.outgoing[1] == nil ||( hub1.outgoing[2].state != conn_ok || hub2.outgoing[1].state != conn_ok) {
+		time.Sleep(delta * time.Millisecond)
+	}
 	if err := hub1.AddClient(clientConn1); err != nil {
 		panic(err)
 	}
 	if err := hub2.AddClient(clientConn2); err != nil {
 		panic(err)
 	}
-
-	time.Sleep(delta * time.Millisecond)
+	time.Sleep(delta * 2 * time.Millisecond)
 	ln.Close()
 	if clientConn1.IsKickoff() != true || clientConn2.IsKickoff() != true {
 		t.Fail()
@@ -287,13 +287,14 @@ func TestKickoff2(t *testing.T) {
 		panic(err)
 	}
 
-	time.Sleep(110 * time.Millisecond)
+	for hub2.outgoing[1] == nil || hub2.outgoing[1].state == 0 {
+		time.Sleep(delta * time.Millisecond)
+	}
 
 	if err := hub2.AddClient(clientConn2); err != nil {
 		panic(err)
 	}
-
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(delta * 2  * time.Millisecond)
 
 	ln.Close()
 	if clientConn1.IsKickoff() != true || clientConn2.IsKickoff() != false || hub1.router[1] != hub2.router[1] {
@@ -344,7 +345,9 @@ func TestRedirect(t *testing.T) {
 	clientConn2 := NewSimpleClientConn(conn2, 1, 2)
 	hub1.AddOtherHub(2, hub2Addr)
 	hub2.AddOtherHub(1, hub1Addr)
-	time.Sleep(delta * time.Millisecond)
+	for hub1.outgoing[2] == nil || hub2.outgoing[1] == nil ||( hub1.outgoing[2].state != conn_ok || hub2.outgoing[1].state != conn_ok) {
+		time.Sleep(delta * time.Millisecond)
+	}
 	if err := hub1.AddClient(clientConn1); err != nil {
 		panic(err)
 	}
@@ -407,7 +410,7 @@ func TestRemoteDispatch(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	hub1.AddOtherHub(2, hub2Addr)
 	hub2.AddOtherHub(1, hub1Addr)
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	content1 := "hi1"
 	content2 := "hi2"
 	hub2.Dispatch(&DeliverMsg{To: 1, Carry: []byte(content1)})

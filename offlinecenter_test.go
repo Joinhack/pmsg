@@ -180,6 +180,7 @@ func TestOfflineCenterArchive(t *testing.T) {
 	hub1.AddOtherHub(2, hub2Addr)
 	hub2.AddOtherHub(1, hub1Addr)
 	time.Sleep(100 * time.Millisecond)
+
 	wg := &sync.WaitGroup{}
 	for m := 0; m < 2; m++ {
 		wg.Add(1)
