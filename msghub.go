@@ -570,6 +570,7 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 	reader := bufio.NewReader(conn)
 	for hub.running {
 		if err = hub.msgProc(conn.id, reader); err != nil {
+			hub.clearRouter(conn.id)
 			return
 		}
 	}
