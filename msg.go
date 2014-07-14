@@ -5,16 +5,17 @@ import (
 )
 
 const (
-	StringMsgType  = iota //like ping, framed msg end with \n
-	ControlMsgType        //framed msg
-
+	_              = iota
+	StringMsgType  //like ping, framed msg end with \n
+	ControlMsgType //framed msg
 	RouteMsgType
 	TempRouteMsgType //do not save
 	OfflineMsgType   //another route msg
 )
 
 const (
-	WhoamIControlType = iota
+	_ = iota
+	WhoamIControlType
 	WhoamIAckControlType
 	AddRouteControlType
 	RemoveRouteControlType
@@ -61,9 +62,17 @@ func (msg *DeliverMsg) Body() []byte {
 	return msg.Carry
 }
 
+func NewDeliverMsg(typ byte, to uint64, carry []byte) *DeliverMsg {
+	if typ != RouteMsgType && typ != TempRouteMsgType && typ != OfflineMsgType {
+		panic(UnknownMsg)
+	}
+	return &DeliverMsg{MsgType: typ, To: to, Carry: carry}
+}
+
 func (msg *DeliverMsg) Bytes() []byte {
 	bs := make([]byte, 11+len(msg.Carry))
 	copy(bs[11:], msg.Carry)
+
 	bs[0] = msg.MsgType
 	binary.LittleEndian.PutUint64(bs[1:], msg.Destination())
 	binary.LittleEndian.PutUint16(bs[9:], uint16(len(msg.Carry)))

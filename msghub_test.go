@@ -2,9 +2,11 @@ package pmsg
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"os"
-	"log"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -28,7 +30,7 @@ func init() {
 
 func TestBitOper(t *testing.T) {
 	hub := NewMsgHub(1, 1024*1024, ":9999")
-	defer func(){
+	defer func() {
 		hub.Close()
 	}()
 	hub.AddRoute(1, 1, 2, nil)
@@ -65,7 +67,7 @@ func TestBitOper(t *testing.T) {
 func TestLocalDispatch(t *testing.T) {
 	hub := NewMsgHub(1, 1024*1024, ":0")
 	ln, _ := net.Listen("tcp", ":0")
-	defer func(){
+	defer func() {
 		hub.Close()
 	}()
 	go func() {
@@ -105,8 +107,8 @@ func TestLocalDispatch(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	content1 := "hi1"
 	content2 := "hi2"
-	hub.Dispatch(&DeliverMsg{To: 1, Carry: []byte(content1)})
-	hub.Dispatch(&DeliverMsg{To: 2, Carry: []byte(content2)})
+	hub.Dispatch(NewDeliverMsg(RouteMsgType,  1,  []byte(content1)))
+	hub.Dispatch(NewDeliverMsg(RouteMsgType,  2,  []byte(content2)))
 	hub.RemoveClient(clientConn1)
 	hub.RemoveClient(clientConn2)
 	clientConn2.Close()
@@ -121,7 +123,7 @@ func TestLocalDispatch(t *testing.T) {
 
 func Test2DevDispatch(t *testing.T) {
 	hub := NewMsgHub(1, 1024*1024, ":0")
-	defer func(){
+	defer func() {
 		hub.Close()
 	}()
 	ln, _ := net.Listen("tcp", ":0")
@@ -161,7 +163,7 @@ func Test2DevDispatch(t *testing.T) {
 	}
 	time.Sleep(delta * time.Millisecond)
 	content1 := "hi1"
-	hub.Dispatch(&DeliverMsg{To: 1, Carry: []byte(content1)})
+	hub.Dispatch(NewDeliverMsg(RouteMsgType, 1, []byte(content1)))
 	hub.RemoveClient(clientConn1)
 	time.Sleep(1 * time.Millisecond)
 	t.Log(hub.router[1])
@@ -184,7 +186,7 @@ func TestKickoff1(t *testing.T) {
 	hub1 := NewMsgHub(1, 1024*1024, ":0")
 	hub2 := NewMsgHub(2, 1024*1024, ":0")
 	ln, _ := net.Listen("tcp", ":0")
-	defer func(){
+	defer func() {
 		hub1.Close()
 		hub2.Close()
 	}()
@@ -223,9 +225,7 @@ func TestKickoff1(t *testing.T) {
 	clientConn2 := NewSimpleClientConn(conn2, 1, 1)
 	hub1.AddOtherHub(2, hub2Addr)
 	hub2.AddOtherHub(1, hub1Addr)
-	for hub1.outgoing[2] == nil || hub2.outgoing[1] == nil ||( hub1.outgoing[2].state != conn_ok || hub2.outgoing[1].state != conn_ok) {
-		time.Sleep(delta * time.Millisecond)
-	}
+	wait(hub1, hub2)
 	if err := hub1.AddClient(clientConn1); err != nil {
 		panic(err)
 	}
@@ -244,7 +244,7 @@ func TestKickoff2(t *testing.T) {
 	hub1 := NewMsgHub(1, 1024*1024, ":0")
 	hub2 := NewMsgHub(2, 1024*1024, ":0")
 	ln, _ := net.Listen("tcp", ":0")
-	defer func(){
+	defer func() {
 		hub1.Close()
 		hub2.Close()
 	}()
@@ -294,7 +294,7 @@ func TestKickoff2(t *testing.T) {
 	if err := hub2.AddClient(clientConn2); err != nil {
 		panic(err)
 	}
-	time.Sleep(delta * 2  * time.Millisecond)
+	time.Sleep(delta * 2 * time.Millisecond)
 
 	ln.Close()
 	if clientConn1.IsKickoff() != true || clientConn2.IsKickoff() != false || hub1.router[1] != hub2.router[1] {
@@ -306,7 +306,7 @@ func TestRedirect(t *testing.T) {
 	hub1 := NewMsgHub(1, 1024*1024, ":0")
 	hub2 := NewMsgHub(2, 1024*1024, ":0")
 	ln, _ := net.Listen("tcp", ":0")
-	defer func(){
+	defer func() {
 		hub1.Close()
 		hub2.Close()
 	}()
@@ -345,9 +345,7 @@ func TestRedirect(t *testing.T) {
 	clientConn2 := NewSimpleClientConn(conn2, 1, 2)
 	hub1.AddOtherHub(2, hub2Addr)
 	hub2.AddOtherHub(1, hub1Addr)
-	for hub1.outgoing[2] == nil || hub2.outgoing[1] == nil ||( hub1.outgoing[2].state != conn_ok || hub2.outgoing[1].state != conn_ok) {
-		time.Sleep(delta * time.Millisecond)
-	}
+	wait(hub1, hub2)
 	if err := hub1.AddClient(clientConn1); err != nil {
 		panic(err)
 	}
@@ -364,14 +362,25 @@ func TestRedirect(t *testing.T) {
 	}
 }
 
+func wait(h1 *MsgHub, h2 *MsgHub) {
+	for h1.outgoing[2] == nil ||
+		h1.outgoing[2].state != conn_ok ||
+		h2.outgoing[1] == nil ||
+		h2.outgoing[1].state != conn_ok {
+		time.Sleep(delta * time.Millisecond)
+	}
+}
+
 func TestRemoteDispatch(t *testing.T) {
 	hub1 := NewMsgHub(1, 1024*1024, ":0")
 	hub2 := NewMsgHub(2, 1024*1024, ":0")
 	ln, _ := net.Listen("tcp", ":0")
-	defer func(){
+	defer func() {
 		hub1.Close()
 		hub2.Close()
 	}()
+	wg := &sync.WaitGroup{}
+	var conn1addr, conn2addr string
 	go func() {
 		for {
 			if c, err := ln.Accept(); err != nil {
@@ -381,10 +390,30 @@ func TestRemoteDispatch(t *testing.T) {
 					var buf [1024]byte
 					var n int
 					var err error
-					if n, err = conn.Read(buf[:]); err != nil {
-						return
+					for {
+						if n, err = conn.Read(buf[:]); err != nil {
+							return
+						}
+						if conn.RemoteAddr().String() == conn1addr {
+							wg.Done()
+						}
+						if conn.RemoteAddr().String() == conn2addr {
+							s := string(buf[:n])
+							if strings.Index(s, ",1") != -1 {
+								wg.Done()
+							}
+							if strings.Index(s, ",2") != -1 {
+								wg.Done()
+							}
+							if strings.Index(s, ",3") != -1 {
+								wg.Done()
+							}
+							if strings.Index(s, ",4") != -1 {
+								wg.Done()
+							}
+						}
+						t.Log(c.RemoteAddr().String(), string(buf[:n]), "\n")
 					}
-					t.Log(c.RemoteAddr().String(), string(buf[:n]))
 				}(c)
 			}
 		}
@@ -398,6 +427,8 @@ func TestRemoteDispatch(t *testing.T) {
 	servAddr := fmt.Sprintf("127.0.0.1:%d", ln.Addr().(*net.TCPAddr).Port)
 	conn1, _ := net.Dial("tcp", servAddr)
 	conn2, _ := net.Dial("tcp", servAddr)
+	conn1addr = conn1.LocalAddr().String()
+	conn2addr = conn2.LocalAddr().String()
 	defer func() {
 		conn1.Close()
 		conn2.Close()
@@ -410,20 +441,31 @@ func TestRemoteDispatch(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	hub1.AddOtherHub(2, hub2Addr)
 	hub2.AddOtherHub(1, hub1Addr)
-	time.Sleep(100 * time.Millisecond)
+	wait(hub1, hub2)
+	for hub2.router[1] == 0 || hub1.router[2] == 0 {
+		time.Sleep(delta * time.Millisecond)
+	}
 	content1 := "hi1"
-	content2 := "hi2"
-	hub2.Dispatch(&DeliverMsg{To: 1, Carry: []byte(content1)})
-	hub1.Dispatch(&DeliverMsg{To: 2, Carry: []byte(content2)})
-	hub1.Dispatch(&DeliverMsg{To: 2, Carry: []byte(content2)})
-	hub1.Dispatch(&DeliverMsg{To: 2, Carry: []byte(content2)})
-	hub1.Dispatch(&DeliverMsg{To: 2, Carry: []byte(content2)})
-	time.Sleep(3 * time.Second)
+	content2 := "\nhi2-:"
+	hub2.Dispatch(NewDeliverMsg(RouteMsgType, 1, []byte(content1)))
+
+	wg.Add(1)
+	hub1.Dispatch(NewDeliverMsg(RouteMsgType, 2, []byte(content2+",1")))
+	wg.Add(1)
+	hub1.Dispatch(NewDeliverMsg(RouteMsgType, 2, []byte(content2+",2")))
+	wg.Add(1)
+	hub1.Dispatch(NewDeliverMsg(RouteMsgType, 2, []byte(content2+",3")))
+	wg.Add(1)
+	hub1.Dispatch(NewDeliverMsg(RouteMsgType, 2, []byte(content2+",4")))
+	wg.Add(1)
+	wg.Wait()
 	hub1.RemoveClient(clientConn1)
 	hub2.RemoveClient(clientConn2)
 	clientConn2.Close()
 	clientConn1.Close()
-	time.Sleep(20 * time.Millisecond)
+	for hub2.router[1] != 0 || hub1.router[2] != 0 {
+		time.Sleep(delta * time.Millisecond)
+	}
 	ln.Close()
 	if hub1.router[1] != 0 || hub1.router[2] != 0 {
 		t.Fail()
@@ -432,4 +474,3 @@ func TestRemoteDispatch(t *testing.T) {
 		t.Fail()
 	}
 }
-

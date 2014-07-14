@@ -13,7 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 )
-const OneConnectionForPeer = false
+
+const OneConnectionForPeer = true
 
 var (
 	OutofServerRange = errors.New("out of max server limits")
@@ -39,8 +40,8 @@ var (
 )
 
 const (
-	conn_closed    = 0
-	conn_ok        = 2
+	conn_closed = 0
+	conn_ok     = 2
 )
 
 type Conn struct {
@@ -280,7 +281,7 @@ func NewMsgHub(id int, maxRange uint64, servAddr string) *MsgHub {
 
 	if OneConnectionForPeer {
 		for i := 0; i < len(hub.outgoing); i++ {
-			hub.outgoing[i] = &Conn{wchan: make(chan Msg), id:i}
+			hub.outgoing[i] = &Conn{wchan: make(chan Msg), id: i}
 		}
 	}
 
@@ -484,7 +485,7 @@ func readRouteMsgBody(reader io.Reader) (to uint64, body []byte, err error) {
 func (hub *MsgHub) msgProc(id int, reader *bufio.Reader) (err error) {
 	var msgType byte
 	var controlType byte
-	
+
 	msgType, err = reader.ReadByte()
 	if err != nil {
 		ERROR.Println("read from incoming error, detail:", err)
@@ -535,6 +536,8 @@ func (hub *MsgHub) msgProc(id int, reader *bufio.Reader) (err error) {
 		if err = hub.OfflineIncomingMsg(OfflineMsgType, reader); err != nil {
 			return
 		}
+	default:
+		err = UnknownMsg
 	}
 	return nil
 }
@@ -609,7 +612,7 @@ func (hub *MsgHub) inLoop(conn *Conn) {
 		}
 	}()
 	reader := bufio.NewReader(conn)
-	for  {
+	for {
 		if err = hub.msgProc(conn.id, reader); err != nil {
 			return
 		}
@@ -662,6 +665,7 @@ func (hub *MsgHub) outProc(id uint64, addr string) {
 		var whoami *WhoamIMsg
 		var old *Conn
 
+		wait = 300
 		//if connection is ok or handleshake, just wait a moment.
 		//if in handleshake wait finish the handleshake.
 		hub.clusterMutex.Lock()
@@ -701,13 +705,14 @@ func (hub *MsgHub) outProc(id uint64, addr string) {
 		//dual check
 		hub.clusterMutex.Lock()
 		old = hub.outgoing[id]
-		if old != nil {
-			if old.state == conn_ok && byte(old.id) < byte(hub.id) {
+		if old != nil && old.state == conn_ok {
+			if byte(id) > byte(hub.id) {
 				hub.clusterMutex.Unlock()
 				conn.Close()
 				continue
+			} else {
+				old.Close()
 			}
-			old.Close()
 		}
 		old.Conn = connect
 		old.state = conn_ok
@@ -742,13 +747,9 @@ func (hub *MsgHub) inProc(c net.Conn) {
 	hub.clusterMutex.Lock()
 	old := hub.outgoing[whoami.Who]
 	if old != nil {
-		if old.state == conn_ok && byte(old.id) > byte(hub.id) {
-			//I think the old should be occupation by outProc
-			//I use the smaller id in active conection
+		if old.state == conn_ok {
 			hub.clusterMutex.Unlock()
 			return
-		} else {
-			old.Close()
 		}
 	}
 	hub.clusterMutex.Unlock()
@@ -758,12 +759,14 @@ func (hub *MsgHub) inProc(c net.Conn) {
 	//dual check
 	hub.clusterMutex.Lock()
 	old = hub.outgoing[whoami.Who]
-	if old != nil {
-		if old.state == conn_ok && byte(old.id) > byte(hub.id) {
+	if old != nil && old.state == conn_ok {
+		//drop the smaller id for active
+		if byte(old.id) < byte(hub.id) {
 			hub.clusterMutex.Unlock()
 			return
+		} else {
+			old.Close()
 		}
-		old.Close()
 	}
 	old.Conn = c
 	old.state = conn_ok

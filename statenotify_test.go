@@ -60,7 +60,7 @@ func TestStateNotifer(t *testing.T) {
 	})
 
 	hub1.AddClient(clientConn1)
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
 	hub2.AddClient(clientConn2)
 	wg.Wait()
 	hub1.RemoveWatcher(elem)
