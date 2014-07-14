@@ -196,7 +196,7 @@ func TestOfflineCenterArchive(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			for i := 20001; i < 40000; i++ {
-				hub1.Dispatch(NewDeliverMsg(RouteMsgType, uint64(i), []byte("11212121212")))
+				hub1.Dispatch(NewDeliverMsg(RouteMsgType, uint32(i), []byte("11212121212")))
 			}
 			wg.Done()
 		}()

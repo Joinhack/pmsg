@@ -14,7 +14,7 @@ func (e *RedirectError) Error() string {
 }
 
 type Client interface {
-	Id() uint64
+	Id() uint32
 	Type() byte
 	SendMsg(msg Msg)
 	Kickoff() //invoke by hub.
@@ -25,12 +25,12 @@ type Client interface {
 type SimpleClientConn struct {
 	net.Conn
 	isKickoff  bool
-	ClientId   uint64
+	ClientId   uint32
 	ClientType byte
 	Wchan      chan Msg
 }
 
-func NewSimpleClientConn(conn net.Conn, id uint64, typ byte) *SimpleClientConn {
+func NewSimpleClientConn(conn net.Conn, id uint32, typ byte) *SimpleClientConn {
 	sconn := &SimpleClientConn{
 		Conn:       conn,
 		ClientId:   id,
@@ -63,7 +63,7 @@ func (conn *SimpleClientConn) Kickoff() {
 func (conn *SimpleClientConn) Redirect(i int) {
 }
 
-func (conn *SimpleClientConn) Id() uint64 {
+func (conn *SimpleClientConn) Id() uint32 {
 	return conn.ClientId
 }
 

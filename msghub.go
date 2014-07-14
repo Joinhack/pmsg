@@ -52,7 +52,7 @@ type Conn struct {
 }
 
 type routerOper struct {
-	destination uint64
+	destination uint32
 	typ         byte
 	hubId       int
 	oper        int
@@ -98,11 +98,11 @@ func (c *Conn) Close() {
 	}
 }
 
-func toKey(id uint64, typ byte) string {
+func toKey(id uint32, typ byte) string {
 	return fmt.Sprintf("%d.%d", id, typ)
 }
 
-func (hub *MsgHub) notifyOfflineMsgReplay(id uint64) {
+func (hub *MsgHub) notifyOfflineMsgReplay(id uint32) {
 	//offline msg is in local
 	if hub.OfflineCenter != nil {
 		hub.OfflineMsgReplay(id)
@@ -125,7 +125,7 @@ func (hub *MsgHub) processRouterOper() {
 			//channel closed
 			return
 		}
-		if oper.destination > hub.maxRange {
+		if uint64(oper.destination) > hub.maxRange {
 			ERROR.Println("invalidate operation")
 			continue
 		}
@@ -195,10 +195,10 @@ func (hub *MsgHub) processRouterOper() {
 					if b != 0 {
 						typBit := (b & RouterMask) >> 6
 						if typBit&0x01 > 0 {
-							hub.notifyLogoff(uint64(i), 0x1)
+							hub.notifyLogoff(uint32(i), 0x1)
 						}
 						if typBit&0x02 > 0 {
-							hub.notifyLogoff(uint64(i), 0x2)
+							hub.notifyLogoff(uint32(i), 0x2)
 						}
 					}
 					hub.router[i] = 0
@@ -238,11 +238,11 @@ func (hub *MsgHub) RemoveClient(client Client) {
 	hub.bordcastMsg(&routeMsg)
 }
 
-func (hub *MsgHub) AddRoute(d uint64, typ byte, id int, client Client) {
+func (hub *MsgHub) AddRoute(d uint32, typ byte, id int, client Client) {
 	hub.routerOperChan <- &routerOper{destination: d, typ: typ, hubId: id, oper: oper_add, client: client}
 }
 
-func (hub *MsgHub) RemoveRoute(d uint64, typ byte) {
+func (hub *MsgHub) RemoveRoute(d uint32, typ byte) {
 	hub.routerOperChan <- &routerOper{destination: d, typ: typ, oper: oper_remove}
 }
 
@@ -462,7 +462,7 @@ func (hub *MsgHub) clearRouter(svrid int) {
 	hub.routerOperChan <- &routerOper{hubId: svrid, oper: oper_clearHub}
 }
 
-func readRouteMsgBody(reader io.Reader) (to uint64, body []byte, err error) {
+func readRouteMsgBody(reader io.Reader) (to uint32, body []byte, err error) {
 	if err = binary.Read(reader, binary.LittleEndian, &to); err != nil {
 		return
 	}
@@ -655,7 +655,7 @@ func (hub *MsgHub) outLoop(conn *Conn) {
 	}
 }
 
-func (hub *MsgHub) outProc(id uint64, addr string) {
+func (hub *MsgHub) outProc(id int, addr string) {
 	var err error
 	var wait time.Duration
 	var conn *Conn
@@ -699,7 +699,7 @@ func (hub *MsgHub) outProc(id uint64, addr string) {
 			connect.Close()
 			goto RETRY
 		}
-		if uint64(whoamiAck.Who) != id {
+		if whoamiAck.Who != id {
 			panic("can't be happend.")
 		}
 		//dual check
@@ -784,7 +784,7 @@ func (hub *MsgHub) AddOtherHub(id int, addr string) (err error) {
 		return DuplicateHubId
 	}
 	if OneConnectionForPeer {
-		go hub.outProc(uint64(id), addr)
+		go hub.outProc(id, addr)
 	} else {
 		go hub.outgoingLoop(addr, id)
 	}

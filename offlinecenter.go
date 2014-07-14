@@ -10,7 +10,7 @@ type OfflineCenter interface {
 	ProcessMsg(msg RouteMsg)
 	AddOfflineMsgFilter(filter OfflineMsgFilter)
 	OfflineOutgoingPrepared(conn io.Writer) error
-	OfflineMsgReplay(id uint64)
+	OfflineMsgReplay(id uint32)
 	OfflineIncomingMsg(byte, io.Reader) error
 	OfflineIncomingControlMsg(byte, byte, io.Reader) error
 	Close()

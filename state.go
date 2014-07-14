@@ -14,7 +14,7 @@ var StateNotiferNum = 10
 
 type StateEvent struct {
 	State   byte
-	Id      uint64
+	Id      uint32
 	DevType byte
 }
 
@@ -85,7 +85,7 @@ func (notifer *StateNotifer) stateProcess(i int) {
 				return
 			}
 			notifer.stateMutex[i].Lock()
-			if l, ok := notifer.watchers[i][event.Id]; ok {
+			if l, ok := notifer.watchers[i][uint64(event.Id)]; ok {
 				for e := l.Front(); e != nil; e = e.Next() {
 					e.Value.(*elementValue).notify(event)
 				}
@@ -95,8 +95,8 @@ func (notifer *StateNotifer) stateProcess(i int) {
 	}
 }
 
-func (notifer *StateNotifer) notifyLogoff(id uint64, devType byte) {
-	idx := int(id % uint64(notifer.stateTaskNum))
+func (notifer *StateNotifer) notifyLogoff(id uint32, devType byte) {
+	idx := int(id % uint32(notifer.stateTaskNum))
 	notifer.stateTaskChans[idx] <- &StateEvent{
 		Id:      id,
 		DevType: devType,
@@ -104,8 +104,8 @@ func (notifer *StateNotifer) notifyLogoff(id uint64, devType byte) {
 	}
 }
 
-func (notifer *StateNotifer) notifyLogon(id uint64, devType byte) {
-	idx := int(id % uint64(notifer.stateTaskNum))
+func (notifer *StateNotifer) notifyLogon(id uint32, devType byte) {
+	idx := int(uint64(id) % uint64(notifer.stateTaskNum))
 	notifer.stateTaskChans[idx] <- &StateEvent{
 		Id:      id,
 		DevType: devType,

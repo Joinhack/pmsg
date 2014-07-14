@@ -34,7 +34,7 @@ var (
 
 type offlineTask struct {
 	taskType int
-	id       uint64
+	id       uint32
 	msg      RouteMsg
 }
 
@@ -104,7 +104,7 @@ func (st *offlineSubTask) Close() {
 
 }
 
-func (st *offlineSubTask) replayMsgFromFile(id uint64) {
+func (st *offlineSubTask) replayMsgFromFile(id uint32) {
 	hub := st.hub
 	var finfo os.FileInfo
 	var err error
@@ -152,8 +152,8 @@ func (st *offlineSubTask) replayMsgFromFile(id uint64) {
 	}
 }
 
-func (st *offlineSubTask) replayMsgFromCache(id uint64) {
-	l := st.cache[id]
+func (st *offlineSubTask) replayMsgFromCache(id uint32) {
+	l := st.cache[uint64(id)]
 	if l == nil {
 		return
 	}
@@ -171,7 +171,7 @@ func (st *offlineSubTask) replayMsgFromCache(id uint64) {
 	l.Init()
 }
 
-func (st *offlineSubTask) replayMsg(id uint64) {
+func (st *offlineSubTask) replayMsg(id uint32) {
 	hub := st.hub
 	if hub.router[id] == 0 {
 		return
@@ -183,7 +183,7 @@ func (st *offlineSubTask) replayMsg(id uint64) {
 func (st *offlineSubTask) writeMsg(msg RouteMsg) {
 	var l *list.List
 	var ok bool
-	id := msg.Destination()
+	id := uint64(msg.Destination())
 	if l, ok = st.cache[id]; !ok {
 		l = list.New()
 		st.cache[id] = l
@@ -293,7 +293,7 @@ func (c *FileStoreOffline) dispatchTask(msg RouteMsg) {
 		return
 	}
 	// every sub task manage 10000 id
-	sidx := (to - c.rangeStart) / MAXIDPERDIR
+	sidx := (uint64(to) - c.rangeStart) / MAXIDPERDIR
 	//TODO: if sidx out of the subtasks
 	c.subTask[sidx].taskchan <- &offlineTask{msg: msg, id: msg.Destination(), taskType: archiveTaskType}
 }
@@ -341,7 +341,7 @@ func (c *FileStoreOffline) writeMsg2binlog(msg RouteMsg) {
 		c.openWriter()
 	}
 	var l uint16 = uint16(len(val))
-	var to uint64 = msg.Destination()
+	var to uint32 = msg.Destination()
 	if err = binary.Write(c.writer, binary.LittleEndian, to); err != nil {
 		panic(err)
 	}
@@ -430,13 +430,13 @@ func NewFileStoreOffline(srange, erange uint64, hub *MsgHub, path string) (c *Fi
 	return
 }
 
-func (c *FileStoreOffline) OfflineMsgReplay(id uint64) {
+func (c *FileStoreOffline) OfflineMsgReplay(id uint32) {
 	hub := c.hub
 	//if not contain
 	if c.offlineRouter[id] != byte(hub.id) {
 		return
 	}
-	c.subTask[(id-c.rangeStart)/uint64(MAXIDPERDIR)].taskchan <- &offlineTask{id: id, taskType: replayTaskType}
+	c.subTask[(uint64(id)-c.rangeStart)/uint64(MAXIDPERDIR)].taskchan <- &offlineTask{id: id, taskType: replayTaskType}
 }
 
 func (c *FileStoreOffline) archive(msg RouteMsg) {

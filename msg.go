@@ -35,14 +35,14 @@ type RouteMsg interface {
 	Msg
 	Type() int
 	SetType(t int)
-	Destination() uint64
+	Destination() uint32
 }
 
 type DeliverMsg struct {
 	RouteMsg
 	IsReplay bool
 	MsgType  byte
-	To       uint64
+	To       uint32
 	Carry    []byte
 }
 
@@ -54,7 +54,7 @@ func (msg *DeliverMsg) Type() int {
 	return int(msg.MsgType)
 }
 
-func (msg *DeliverMsg) Destination() uint64 {
+func (msg *DeliverMsg) Destination() uint32 {
 	return msg.To
 }
 
@@ -62,7 +62,7 @@ func (msg *DeliverMsg) Body() []byte {
 	return msg.Carry
 }
 
-func NewDeliverMsg(typ byte, to uint64, carry []byte) *DeliverMsg {
+func NewDeliverMsg(typ byte, to uint32, carry []byte) *DeliverMsg {
 	if typ != RouteMsgType && typ != TempRouteMsgType && typ != OfflineMsgType {
 		panic(UnknownMsg)
 	}
@@ -70,12 +70,12 @@ func NewDeliverMsg(typ byte, to uint64, carry []byte) *DeliverMsg {
 }
 
 func (msg *DeliverMsg) Bytes() []byte {
-	bs := make([]byte, 11+len(msg.Carry))
-	copy(bs[11:], msg.Carry)
+	bs := make([]byte, 7+len(msg.Carry))
+	copy(bs[7:], msg.Carry)
 
 	bs[0] = msg.MsgType
-	binary.LittleEndian.PutUint64(bs[1:], msg.Destination())
-	binary.LittleEndian.PutUint16(bs[9:], uint16(len(msg.Carry)))
+	binary.LittleEndian.PutUint32(bs[1:], msg.Destination())
+	binary.LittleEndian.PutUint16(bs[5:], uint16(len(msg.Carry)))
 	return bs
 }
 
@@ -91,7 +91,7 @@ type WhoamIMsg struct {
 type RouteControlMsg struct {
 	ControlType int
 	Type        byte   //0x1 0x2
-	Id          uint64 //client Id
+	Id          uint32 //client Id
 }
 
 func (msg *RouteControlMsg) Unmarshal(bs []byte) error {
@@ -100,7 +100,7 @@ func (msg *RouteControlMsg) Unmarshal(bs []byte) error {
 	}
 	msg.ControlType = int(bs[1])
 	msg.Type = bs[2]
-	msg.Id = binary.LittleEndian.Uint64(bs[3:])
+	msg.Id = binary.LittleEndian.Uint32(bs[3:])
 	return nil
 }
 
@@ -115,7 +115,7 @@ func NewWhoamIAckMsg(who int) *WhoamIMsg {
 }
 
 func (msg *RouteControlMsg) Len() int {
-	return 11
+	return 7
 }
 
 func (msg *RouteControlMsg) Bytes() []byte {
@@ -123,7 +123,7 @@ func (msg *RouteControlMsg) Bytes() []byte {
 	bs[0] = ControlMsgType
 	bs[1] = byte(msg.ControlType)
 	bs[2] = msg.Type
-	binary.LittleEndian.PutUint64(bs[3:], msg.Id)
+	binary.LittleEndian.PutUint32(bs[3:], msg.Id)
 	return bs
 }
 
