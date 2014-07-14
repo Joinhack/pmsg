@@ -70,7 +70,7 @@ const (
 
 type MsgHub struct {
 	id             int
-	maxRange       uint64
+	maxRange       uint32
 	router         []byte
 	servAddr       string
 	outgoing       [MaxRouter]*Conn //just for write, when one conection for communication for peer reuse it
@@ -125,7 +125,7 @@ func (hub *MsgHub) processRouterOper() {
 			//channel closed
 			return
 		}
-		if uint64(oper.destination) > hub.maxRange {
+		if oper.destination > hub.maxRange {
 			ERROR.Println("invalidate operation")
 			continue
 		}
@@ -248,7 +248,7 @@ func (hub *MsgHub) RemoveRoute(d uint32, typ byte) {
 
 type MsgHubFileStoreOfflineCenterConfig struct {
 	Id                int
-	MaxRange          uint64
+	MaxRange          uint32
 	ServAddr          string
 	OfflineRangeStart uint64
 	OfflineRangeEnd   uint64
@@ -265,7 +265,7 @@ func NewMsgHubWithFileStoreOfflineCenter(cfg *MsgHubFileStoreOfflineCenterConfig
 	return hub
 }
 
-func NewMsgHub(id int, maxRange uint64, servAddr string) *MsgHub {
+func NewMsgHub(id int, maxRange uint32, servAddr string) *MsgHub {
 	hub := &MsgHub{
 		id:             id,
 		router:         make([]byte, maxRange),
@@ -297,7 +297,7 @@ func (hub *MsgHub) ClientsUnlock() {
 	hub._clientsMutex.Unlock()
 }
 
-func (hub *MsgHub) MaxRange() uint64 {
+func (hub *MsgHub) MaxRange() uint32 {
 	return hub.maxRange
 }
 

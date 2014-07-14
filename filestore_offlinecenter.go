@@ -454,7 +454,7 @@ func (c *FileStoreOffline) archive(msg RouteMsg) {
 func (c *FileStoreOffline) AddOfflineRouter(srange, erange uint64, hubid int) error {
 	hub := c.hub
 	maxRange := hub.MaxRange()
-	if srange > maxRange || erange > maxRange {
+	if srange > uint64(maxRange) || erange > uint64(maxRange) {
 		return OutOfMaxRange
 	}
 	hub.ClientsLock()
