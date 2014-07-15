@@ -40,15 +40,83 @@ var (
 )
 
 const (
-	conn_closed = 0
-	conn_ok     = 2
+	conn_closed      = 0
+	conn_half_closed = 1
+	conn_ok          = 2
 )
 
-type Conn struct {
+type Conn interface {
+	Send(Msg)
+	Close()
+	State() byte
+}
+
+type SimplexConn struct {
 	net.Conn
 	state byte //the connection state
 	wchan chan Msg
 	id    int
+}
+
+func (c *SimplexConn) State() byte {
+	return c.state
+}
+
+func (c *SimplexConn) Send(msg Msg) {
+	if c.state == conn_ok {
+		c.wchan <- msg
+	}
+}
+
+func (c *SimplexConn) Close() {
+	c.state = conn_closed
+	defer func() {
+		if e := recover(); e != nil {
+			WARN.Println(e)
+		}
+	}()
+	if c.Conn != nil {
+		c.Conn.Close()
+	}
+}
+
+type DuplexConn struct {
+	net.Conn
+	state byte //the connection state
+	wchan chan Msg
+	id    int
+	q     chan byte
+	mtx   *sync.Mutex
+}
+
+func (c *DuplexConn) Send(msg Msg) {
+	if c.state == conn_ok {
+		c.wchan <- msg
+	}
+}
+
+func (c *DuplexConn) Close() {
+	defer func() {
+		if e := recover(); e != nil {
+			WARN.Println(e)
+		}
+	}()
+	if c.state == conn_ok {
+		c.state = conn_half_closed
+	} else {
+		c.state = conn_closed
+	}
+	if c.Conn != nil {
+		c.Conn.Close()
+	}
+	if c.q != nil {
+		close(c.q)
+		c.q = nil	
+	}
+}
+
+func (c *DuplexConn) State() byte {
+	return c.state
 }
 
 type routerOper struct {
@@ -73,29 +141,16 @@ type MsgHub struct {
 	maxRange       uint32
 	router         []byte
 	servAddr       string
-	outgoing       [MaxRouter]*Conn //just for write, when one conection for communication for peer reuse it
-	incoming       [MaxRouter]*Conn //just for read
+	outgoing       [MaxRouter]Conn //just for write, when one conection for communication for peer reuse it
+	incoming       [MaxRouter]Conn //just for read
 	clients        map[string]Client
 	routerOperChan chan *routerOper
 	listener       net.Listener
 	dropCount      uint64
 	running        bool
-	clusterMutex   *sync.Mutex
 	_clientsMutex  *sync.Mutex
 	OfflineCenter
 	*StateNotifer
-}
-
-func (c *Conn) Close() {
-	c.state = conn_closed
-	defer func() {
-		if e := recover(); e != nil {
-			WARN.Println(e)
-		}
-	}()
-	if c.Conn != nil {
-		c.Conn.Close()
-	}
 }
 
 func toKey(id uint32, typ byte) string {
@@ -275,13 +330,12 @@ func NewMsgHub(id int, maxRange uint32, servAddr string) *MsgHub {
 		servAddr:       servAddr,
 		clients:        make(map[string]Client, 1024),
 		_clientsMutex:  &sync.Mutex{},
-		clusterMutex:   &sync.Mutex{},
 		StateNotifer:   newStateNotifer(StateNotiferNum),
 	}
 
 	if OneConnectionForPeer {
 		for i := 0; i < len(hub.outgoing); i++ {
-			hub.outgoing[i] = &Conn{wchan: make(chan Msg), id: i}
+			hub.outgoing[i] = &DuplexConn{wchan: make(chan Msg), id: i, mtx: &sync.Mutex{}}
 		}
 	}
 
@@ -320,7 +374,7 @@ func (hub *MsgHub) outgoingLoop(addr string, id int) {
 	var err error
 	var msg Msg
 	var ok bool
-	conn := &Conn{id: id, wchan: make(chan Msg, 1)}
+	conn := &SimplexConn{id: id, wchan: make(chan Msg, 1)}
 	hub.outgoing[id] = conn
 	for hub.running {
 		if conn.state == conn_closed {
@@ -379,8 +433,8 @@ func (hub *MsgHub) outgoingLoop(addr string, id int) {
 
 func (hub *MsgHub) bordcastMsg(msg *RouteControlMsg) {
 	for _, conn := range hub.outgoing {
-		if conn != nil && conn.state == conn_ok {
-			conn.wchan <- msg
+		if conn != nil {
+			conn.Send(msg)
 		}
 	}
 }
@@ -417,7 +471,7 @@ func (hub *MsgHub) LocalDispatch(msg RouteMsg) {
 }
 
 func (hub *MsgHub) RemoteDispatch(id int, msg RouteMsg) {
-	var outgoing *Conn
+	var outgoing Conn
 	outgoing = hub.outgoing[id]
 	defer func() {
 		if err := recover(); err != nil {
@@ -426,7 +480,7 @@ func (hub *MsgHub) RemoteDispatch(id int, msg RouteMsg) {
 		}
 	}()
 	if outgoing != nil {
-		outgoing.wchan <- msg
+		outgoing.Send(msg)
 	} else {
 		//TODO: persist msg, wait for the outgoing connection. then send the msg
 		WARN.Println("waiting for TODO")
@@ -563,7 +617,7 @@ func (hub *MsgHub) incomingLoop(c net.Conn) {
 	if err = whoami.Unmarshal(whoamiSli); err != nil {
 		return
 	}
-	conn := &Conn{id: int(whoami.Who), Conn: c}
+	conn := &SimplexConn{id: int(whoami.Who), Conn: c}
 	if hub.incoming[conn.id] != nil {
 		hub.incoming[conn.id].Close()
 	}
@@ -599,41 +653,46 @@ func (hub *MsgHub) ListenAndServe() error {
 	return nil
 }
 
-func (hub *MsgHub) inLoop(conn *Conn) {
+func (hub *MsgHub) inLoop(c *DuplexConn) {
 	var err error
 	defer func() {
-		WARN.Println("in loop quit:", conn.id)
+		WARN.Println(fmt.Sprintf("hub[%d] in loop quit. connect id:%d", hub.id, c.id))
 		if e := recover(); e != nil {
 			ERROR.Println(e)
 		}
-		conn.Close()
-		if err != nil {
+		c.mtx.Lock()
+		c.Close()
+		c.mtx.Unlock()
+		if err != nil && err != io.EOF {
 			ERROR.Println(err)
 		}
 	}()
-	reader := bufio.NewReader(conn)
+	reader := bufio.NewReader(c.Conn)
 	for {
-		if err = hub.msgProc(conn.id, reader); err != nil {
+		if err = hub.msgProc(c.id, reader); err != nil {
+			hub.clearRouter(c.id)
 			return
 		}
 	}
 }
 
-func (hub *MsgHub) outLoop(conn *Conn) {
+func (hub *MsgHub) outLoop(c *DuplexConn) {
 	var err error
 	defer func() {
-		WARN.Println("out loop quit:", conn.id)
-		conn.Close()
-		if err != nil {
+		WARN.Println(fmt.Sprintf("hub[%d] out loop quit. connect id:%d", hub.id, c.id))
+		c.mtx.Lock()
+		c.Close()
+		c.mtx.Unlock()
+		if err != nil && err != io.EOF {
 			ERROR.Println(err)
 		}
 	}()
 	//rebuild remote router
-	if err = hub.rebuildRemoteRouter(conn); err != nil {
+	if err = hub.rebuildRemoteRouter(c); err != nil {
 		return
 	}
 	if hub.OfflineCenter != nil {
-		if err = hub.OfflineOutgoingPrepared(conn); err != nil {
+		if err = hub.OfflineOutgoingPrepared(c); err != nil {
 			return
 		}
 	}
@@ -642,14 +701,16 @@ func (hub *MsgHub) outLoop(conn *Conn) {
 	for {
 		var ok bool
 		select {
-		case msg, ok = <-conn.wchan: //the channel will never closed.
+		case msg, ok = <-c.wchan: //the channel will never closed.
 			if !ok {
 				return
 			}
+		case <-c.q:
+			return
 		case <-time.After(2 * time.Second):
 			msg = Ping
 		}
-		if _, err = conn.Write(msg.Bytes()); err != nil {
+		if _, err = c.Write(msg.Bytes()); err != nil {
 			return
 		}
 	}
@@ -658,26 +719,27 @@ func (hub *MsgHub) outLoop(conn *Conn) {
 func (hub *MsgHub) outProc(id int, addr string) {
 	var err error
 	var wait time.Duration
-	var conn *Conn
-	var connect net.Conn
+	var conn *DuplexConn
 	for hub.running {
+		var c net.Conn
 		var whoamiAck WhoamIMsg
 		var whoami *WhoamIMsg
-		var old *Conn
-
 		wait = 300
 		//if connection is ok or handleshake, just wait a moment.
 		//if in handleshake wait finish the handleshake.
-		hub.clusterMutex.Lock()
-		conn = hub.outgoing[id]
-		if conn != nil && conn.state != conn_closed {
-			hub.clusterMutex.Unlock()
-			time.Sleep(2000 * time.Millisecond)
+		conn = hub.outgoing[id].(*DuplexConn)
+		conn.mtx.Lock()
+		if conn.state != conn_closed {
+			if conn.state == conn_ok {
+				wait = 2000
+			}
+			conn.mtx.Unlock()
+			time.Sleep(wait * time.Millisecond)
 			continue
 		}
-		hub.clusterMutex.Unlock()
+		conn.mtx.Unlock()
 		whoamiSli := make([]byte, whoamiAck.Len())
-		connect, err = net.Dial("tcp", addr)
+		c, err = net.Dial("tcp", addr)
 		if err != nil {
 			//if the peer is not listen. need more time.
 			wait = 2000
@@ -685,40 +747,40 @@ func (hub *MsgHub) outProc(id int, addr string) {
 		}
 		//handleshake with the peer.
 		whoami = NewWhoamIMsg(hub.id)
-		_, err = connect.Write(whoami.Bytes())
+		_, err = c.Write(whoami.Bytes())
 		if err != nil {
 			goto RETRY
 		}
 		//wait for the peer give the ack if every thing is fine.
 		//if the peer found already have a connection for this peer, should close the connection.
-		if _, err = connect.Read(whoamiSli); err != nil {
-			connect.Close()
+		if _, err = c.Read(whoamiSli); err != nil {
+			c.Close()
 			goto RETRY
 		}
 		if err = whoamiAck.Unmarshal(whoamiSli); err != nil {
-			connect.Close()
+			c.Close()
 			goto RETRY
 		}
 		if whoamiAck.Who != id {
 			panic("can't be happend.")
 		}
 		//dual check
-		hub.clusterMutex.Lock()
-		old = hub.outgoing[id]
-		if old != nil && old.state == conn_ok {
+		conn.mtx.Lock()
+		if conn.state == conn_ok {
 			if byte(id) > byte(hub.id) {
-				hub.clusterMutex.Unlock()
-				conn.Close()
+				conn.mtx.Unlock()
+				c.Close()
 				continue
 			} else {
-				old.Close()
+				conn.Close()
 			}
 		}
-		old.Conn = connect
-		old.state = conn_ok
-		hub.clusterMutex.Unlock()
-		go hub.inLoop(old)
-		hub.outLoop(old)
+		conn.Conn = c
+		conn.q = make(chan byte)
+		conn.state = conn_ok
+		conn.mtx.Unlock()
+		go hub.inLoop(conn)
+		hub.outLoop(conn)
 		continue
 	RETRY:
 		time.Sleep(time.Duration(wait) * time.Millisecond)
@@ -744,35 +806,33 @@ func (hub *MsgHub) inProc(c net.Conn) {
 		return
 	}
 
-	hub.clusterMutex.Lock()
-	old := hub.outgoing[whoami.Who]
-	if old != nil {
-		if old.state == conn_ok {
-			hub.clusterMutex.Unlock()
-			return
-		}
+	conn := hub.outgoing[whoami.Who].(*DuplexConn)
+	conn.mtx.Lock()
+	if conn.state != conn_closed {
+		conn.mtx.Unlock()
+		return
 	}
-	hub.clusterMutex.Unlock()
+	conn.mtx.Unlock()
 	if _, err = c.Write(NewWhoamIAckMsg(hub.id).Bytes()); err != nil {
 		return
 	}
 	//dual check
-	hub.clusterMutex.Lock()
-	old = hub.outgoing[whoami.Who]
-	if old != nil && old.state == conn_ok {
-		//drop the smaller id for active
-		if byte(old.id) < byte(hub.id) {
-			hub.clusterMutex.Unlock()
+	conn.mtx.Lock()
+	if conn != nil && conn.state == conn_ok {
+		//drop the smaller id in active
+		if byte(conn.id) < byte(hub.id) {
+			conn.mtx.Unlock()
 			return
 		} else {
-			old.Close()
+			conn.Close()
 		}
 	}
-	old.Conn = c
-	old.state = conn_ok
-	hub.clusterMutex.Unlock()
-	go hub.outLoop(old)
-	hub.inLoop(old)
+	conn.Conn = c
+	conn.q = make(chan byte)
+	conn.state = conn_ok
+	conn.mtx.Unlock()
+	go hub.outLoop(conn)
+	hub.inLoop(conn)
 }
 
 func (hub *MsgHub) AddOtherHub(id int, addr string) (err error) {
