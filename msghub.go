@@ -111,7 +111,7 @@ func (c *DuplexConn) Close() {
 	}
 	if c.q != nil {
 		close(c.q)
-		c.q = nil	
+		c.q = nil
 	}
 }
 
@@ -513,7 +513,9 @@ func (hub *MsgHub) Dispatch(msg RouteMsg) {
 }
 
 func (hub *MsgHub) clearRouter(svrid int) {
-	hub.routerOperChan <- &routerOper{hubId: svrid, oper: oper_clearHub}
+	if hub.running {
+		hub.routerOperChan <- &routerOper{hubId: svrid, oper: oper_clearHub}
+	}
 }
 
 func readRouteMsgBody(reader io.Reader) (to uint32, body []byte, err error) {
@@ -697,6 +699,8 @@ func (hub *MsgHub) outLoop(c *DuplexConn) {
 		}
 	}
 
+	//after rebuild the router, we think the connection is fine now, so if pipe broken, clean the router.
+	defer hub.clearRouter(c.id)
 	var msg Msg
 	for {
 		var ok bool
