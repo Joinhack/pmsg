@@ -13,6 +13,11 @@ import (
 	"time"
 )
 
+var (
+	MustbeFilePath = errors.New("Must be file path")
+	MustbeDir      = errors.New("Must be dir")
+)
+
 const (
 	archiveTaskType = iota
 	replayTaskType  //if user online send the notify control sub task send msg
@@ -65,6 +70,25 @@ type FileStoreOffline struct {
 	archivedFiles        *list.List
 	subTask              []*offlineSubTask
 	offlineRouter        []byte
+}
+
+func open(path string, flag int) (*os.File, error) {
+	var stat os.FileInfo
+	var f *os.File
+	var err error
+	if stat, err = os.Stat(path); err == nil {
+		if stat.IsDir() {
+			panic("meta data must be reglar file")
+		}
+		if f, err = os.OpenFile(path, flag, 0644); err != nil {
+			return nil, err
+		}
+	} else if os.IsNotExist(err) {
+		if f, err = os.OpenFile(path, flag|os.O_CREATE, 0644); err != nil {
+			return nil, err
+		}
+	}
+	return f, nil
 }
 
 func newOfflineSubTask(hub *MsgHub, mutex *sync.Mutex, path string, id int) *offlineSubTask {
