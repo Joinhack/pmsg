@@ -438,10 +438,11 @@ func TestRemoteDispatch(t *testing.T) {
 	clientConn2 := NewSimpleClientConn(conn2, 2, 1)
 	hub1.AddClient(clientConn1)
 	hub2.AddClient(clientConn2)
-	time.Sleep(10 * time.Millisecond)
 	hub1.AddOtherHub(2, hub2Addr)
 	hub2.AddOtherHub(1, hub1Addr)
 	wait(hub1, hub2)
+
+	//wait for build route.
 	for hub2.router[1] == 0 || hub1.router[2] == 0 {
 		time.Sleep(delta * time.Millisecond)
 	}
@@ -524,10 +525,11 @@ func TestConnectionBroken(t *testing.T) {
 	clientConn2 := NewSimpleClientConn(conn2, 2, 1)
 	hub1.AddClient(clientConn1)
 	hub2.AddClient(clientConn2)
-	time.Sleep(10 * time.Millisecond)
 	hub1.AddOtherHub(2, hub2Addr)
 	hub2.AddOtherHub(1, hub1Addr)
 	wait(hub1, hub2)
+	
+	//wait for build route.
 	for hub2.router[1] == 0 || hub1.router[2] == 0 {
 		time.Sleep(delta * time.Millisecond)
 	}
