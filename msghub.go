@@ -167,11 +167,6 @@ func (hub *MsgHub) notifyOfflineMsgReplay(id uint32) {
 func (hub *MsgHub) processRouterOper() {
 	var oper *routerOper
 	var ok bool
-	defer func() {
-		if e := recover(); e != nil {
-			ERROR.Println(e)
-		}
-	}()
 	for hub.running {
 		select {
 		case oper, ok = <-hub.routerOperChan:
@@ -317,6 +312,12 @@ func NewMsgHubWithFileStoreOfflineCenter(cfg *MsgHubFileStoreOfflineCenterConfig
 	} else {
 		hub.OfflineCenter = c
 	}
+	return hub
+}
+
+func NewMsgHubWithOfflineCenter(id int, maxRange uint32, servAddr string, oc OfflineCenter) *MsgHub {
+	hub := NewMsgHub(id, maxRange, servAddr)
+	hub.OfflineCenter = oc
 	return hub
 }
 
